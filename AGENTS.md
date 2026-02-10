@@ -53,6 +53,8 @@
   (`generate-patches.sh` is the sole patch generation entry point; it only clears and rebuilds `patches/`.)
 - 禁止在本仓库中包含 OpenClaw 原项目源代码。  
   (Never include original OpenClaw source code in this repo.)
+- **补丁必须永远基于最新稳定版（release tag）生成**，基线随官方发布更新，不固定某个版本。  
+  (**Patches must always be generated against the latest stable release tag**; the baseline moves with each official release, never pinned to a fixed version.)
 
 ## 文档规则 / Documentation Rules
 
