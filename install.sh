@@ -14,6 +14,6 @@ git clone "$REPO_URL" "$TARGET_DIR"
 cd "$TARGET_DIR"
 git checkout "$BASE_COMMIT"
 
-git am ../*.patch
+git am ../patches/*.patch
 
 echo "Done. Applied patches on top of $BASE_COMMIT in $TARGET_DIR"
