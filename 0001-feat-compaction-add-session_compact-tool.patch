@@ -1,0 +1,322 @@
+From 02288f88e906b663a7ff779cf5b290f18616485d Mon Sep 17 00:00:00 2001
+From: programcaicai <programcaicai@programcaicaideMac-mini.local>
+Date: Wed, 4 Feb 2026 15:25:56 +0800
+Subject: [PATCH 01/12] feat(compaction): add session_compact tool
+
+---
+ src/agents/openclaw-tools.ts                 |   8 ++
+ src/agents/pi-embedded-runner/run/attempt.ts |  56 ++++++++-
+ src/agents/pi-embedded-runner/runs.ts        |  19 +++
+ src/agents/pi-tools.ts                       |   3 +
+ src/agents/tools/session-compact-tool.ts     | 118 +++++++++++++++++++
+ 5 files changed, 202 insertions(+), 2 deletions(-)
+ create mode 100644 src/agents/tools/session-compact-tool.ts
+
+diff --git a/src/agents/openclaw-tools.ts b/src/agents/openclaw-tools.ts
+index b38645f14..75292315c 100644
+--- a/src/agents/openclaw-tools.ts
++++ b/src/agents/openclaw-tools.ts
+@@ -11,6 +11,7 @@ import { createGatewayTool } from "./tools/gateway-tool.js";
+ import { createImageTool } from "./tools/image-tool.js";
+ import { createMessageTool } from "./tools/message-tool.js";
+ import { createNodesTool } from "./tools/nodes-tool.js";
++import { createSessionCompactTool } from "./tools/session-compact-tool.js";
+ import { createSessionStatusTool } from "./tools/session-status-tool.js";
+ import { createSessionsHistoryTool } from "./tools/sessions-history-tool.js";
+ import { createSessionsListTool } from "./tools/sessions-list-tool.js";
+@@ -25,6 +26,8 @@ export function createOpenClawTools(options?: {
+   agentSessionKey?: string;
+   agentChannel?: GatewayMessageChannel;
+   agentAccountId?: string;
++  /** Embedded session id when available (enables tools that operate on the active run). */
++  agentSessionId?: string;
+   /** Delivery target (e.g. telegram:group:123:topic:456) for topic/thread routing. */
+   agentTo?: string;
+   /** Thread/topic identifier for routing replies to the originating thread. */
+@@ -143,6 +146,11 @@ export function createOpenClawTools(options?: {
+       agentSessionKey: options?.agentSessionKey,
+       config: options?.config,
+     }),
++    createSessionCompactTool({
++      agentSessionKey: options?.agentSessionKey,
++      agentSessionId: options?.agentSessionId,
++      config: options?.config,
++    }),
+     ...(webSearchTool ? [webSearchTool] : []),
+     ...(webFetchTool ? [webFetchTool] : []),
+     ...(imageTool ? [imageTool] : []),
+diff --git a/src/agents/pi-embedded-runner/run/attempt.ts b/src/agents/pi-embedded-runner/run/attempt.ts
+index 086b11fae..6552df727 100644
+--- a/src/agents/pi-embedded-runner/run/attempt.ts
++++ b/src/agents/pi-embedded-runner/run/attempt.ts
+@@ -1,7 +1,12 @@
+ import type { AgentMessage } from "@mariozechner/pi-agent-core";
+ import type { ImageContent } from "@mariozechner/pi-ai";
+ import { streamSimple } from "@mariozechner/pi-ai";
+-import { createAgentSession, SessionManager, SettingsManager } from "@mariozechner/pi-coding-agent";
++import {
++  createAgentSession,
++  estimateTokens,
++  SessionManager,
++  SettingsManager,
++} from "@mariozechner/pi-coding-agent";
+ import fs from "node:fs/promises";
+ import os from "node:os";
+ import type { EmbeddedRunAttemptParams, EmbeddedRunAttemptResult } from "./types.js";
+@@ -228,6 +233,7 @@ export async function runEmbeddedAttempt(
+           senderE164: params.senderE164,
+           senderIsOwner: params.senderIsOwner,
+           sessionKey: params.sessionKey ?? params.sessionId,
++          sessionId: params.sessionId,
+           agentDir,
+           workspaceDir: effectiveWorkspace,
+           config: params.config,
+@@ -654,12 +660,58 @@ export async function runEmbeddedAttempt(
+         getCompactionCount,
+       } = subscription;
+ 
++      let toolCompactionInFlight = false;
++
+       const queueHandle: EmbeddedPiQueueHandle = {
+         queueMessage: async (text: string) => {
+           await activeSession.steer(text);
+         },
+         isStreaming: () => activeSession.isStreaming,
+-        isCompacting: () => subscription.isCompacting(),
++        isCompacting: () => subscription.isCompacting() || toolCompactionInFlight,
++        compact: async (instructions?: string) => {
++          if (toolCompactionInFlight) {
++            return { ok: true, compacted: false, reason: "already compacting" };
++          }
++
++          toolCompactionInFlight = true;
++          try {
++            const result = await activeSession.compact(instructions);
++
++            // Best-effort token estimate after compaction.
++            let tokensAfter: number | undefined;
++            try {
++              let sum = 0;
++              for (const message of activeSession.messages) {
++                sum += estimateTokens(message);
++              }
++              if (sum <= result.tokensBefore) {
++                tokensAfter = sum;
++              }
++            } catch {
++              tokensAfter = undefined;
++            }
++
++            return {
++              ok: true,
++              compacted: true,
++              result: {
++                summary: result.summary,
++                firstKeptEntryId: result.firstKeptEntryId,
++                tokensBefore: result.tokensBefore,
++                tokensAfter,
++                details: result.details,
++              },
++            };
++          } catch (err) {
++            return {
++              ok: false,
++              compacted: false,
++              reason: describeUnknownError(err),
++            };
++          } finally {
++            toolCompactionInFlight = false;
++          }
++        },
+         abort: abortRun,
+       };
+       setActiveEmbeddedRun(params.sessionId, queueHandle);
+diff --git a/src/agents/pi-embedded-runner/runs.ts b/src/agents/pi-embedded-runner/runs.ts
+index f5ca97210..d431f4a78 100644
+--- a/src/agents/pi-embedded-runner/runs.ts
++++ b/src/agents/pi-embedded-runner/runs.ts
+@@ -1,3 +1,4 @@
++import type { EmbeddedPiCompactResult } from "./types.js";
+ import {
+   diagnosticLogger as diag,
+   logMessageQueued,
+@@ -8,6 +9,7 @@ type EmbeddedPiQueueHandle = {
+   queueMessage: (text: string) => Promise<void>;
+   isStreaming: () => boolean;
+   isCompacting: () => boolean;
++  compact: (instructions?: string) => Promise<EmbeddedPiCompactResult>;
+   abort: () => void;
+ };
+ 
+@@ -37,6 +39,23 @@ export function queueEmbeddedPiMessage(sessionId: string, text: string): boolean
+   return true;
+ }
+ 
++export async function compactEmbeddedPiRun(
++  sessionId: string,
++  instructions?: string,
++): Promise<EmbeddedPiCompactResult> {
++  const handle = ACTIVE_EMBEDDED_RUNS.get(sessionId);
++  if (!handle) {
++    diag.debug(`compact failed: sessionId=${sessionId} reason=no_active_run`);
++    return { ok: false, compacted: false, reason: "no active run" };
++  }
++  if (handle.isCompacting()) {
++    diag.debug(`compact skipped: sessionId=${sessionId} reason=compacting`);
++    return { ok: true, compacted: false, reason: "already compacting" };
++  }
++  diag.debug(`compacting run: sessionId=${sessionId}`);
++  return await handle.compact(instructions);
++}
++
+ export function abortEmbeddedPiRun(sessionId: string): boolean {
+   const handle = ACTIVE_EMBEDDED_RUNS.get(sessionId);
+   if (!handle) {
+diff --git a/src/agents/pi-tools.ts b/src/agents/pi-tools.ts
+index 0508cda22..c5741ef6c 100644
+--- a/src/agents/pi-tools.ts
++++ b/src/agents/pi-tools.ts
+@@ -120,6 +120,8 @@ export function createOpenClawCodingTools(options?: {
+   messageThreadId?: string | number;
+   sandbox?: SandboxContext | null;
+   sessionKey?: string;
++  /** Embedded session id when available (allows tools to target the active in-memory run). */
++  sessionId?: string;
+   agentDir?: string;
+   workspaceDir?: string;
+   config?: OpenClawConfig;
+@@ -327,6 +329,7 @@ export function createOpenClawCodingTools(options?: {
+       sandboxBrowserBridgeUrl: sandbox?.browser?.bridgeUrl,
+       allowHostBrowserControl: sandbox ? sandbox.browserAllowHostControl : true,
+       agentSessionKey: options?.sessionKey,
++      agentSessionId: options?.sessionId,
+       agentChannel: resolveGatewayMessageChannel(options?.messageProvider),
+       agentAccountId: options?.agentAccountId,
+       agentTo: options?.messageTo,
+diff --git a/src/agents/tools/session-compact-tool.ts b/src/agents/tools/session-compact-tool.ts
+new file mode 100644
+index 000000000..d46e940c4
+--- /dev/null
++++ b/src/agents/tools/session-compact-tool.ts
+@@ -0,0 +1,118 @@
++import { Type } from "@sinclair/typebox";
++import type { OpenClawConfig } from "../../config/config.js";
++import type { AnyAgentTool } from "./common.js";
++import { loadConfig } from "../../config/config.js";
++import {
++  loadSessionStore,
++  resolveStorePath,
++  updateSessionStore,
++  type SessionEntry,
++} from "../../config/sessions.js";
++import { enqueueSystemEvent } from "../../infra/system-events.js";
++import { resolveSessionAgentId } from "../agent-scope.js";
++import { compactEmbeddedPiRun } from "../pi-embedded-runner/runs.js";
++import { readStringParam } from "./common.js";
++
++const SessionCompactToolSchema = Type.Object({
++  instructions: Type.Optional(Type.String({ minLength: 1 })),
++});
++
++export function createSessionCompactTool(opts?: {
++  agentSessionKey?: string;
++  agentSessionId?: string;
++  config?: OpenClawConfig;
++}): AnyAgentTool {
++  return {
++    label: "Session Compact",
++    name: "session_compact",
++    description:
++      "Trigger semantic session compaction (equivalent to /compact). Use when conversation history is getting large or before topic switches.",
++    parameters: SessionCompactToolSchema,
++    execute: async (_toolCallId, args) => {
++      const params = args as Record<string, unknown>;
++      const instructions = readStringParam(params, "instructions")?.trim() || undefined;
++
++      const sessionKey = opts?.agentSessionKey?.trim();
++      if (!sessionKey) {
++        throw new Error("session_compact requires agentSessionKey");
++      }
++      const sessionId = opts?.agentSessionId?.trim();
++      if (!sessionId) {
++        return {
++          content: [
++            {
++              type: "text",
++              text: "session_compact is unavailable (missing sessionId). Use /compact instead.",
++            },
++          ],
++          details: { ok: false, compacted: false, reason: "missing sessionId" },
++        };
++      }
++
++      const cfg = opts?.config ?? loadConfig();
++      const result = await compactEmbeddedPiRun(sessionId, instructions);
++
++      if (result.ok && result.compacted && result.result?.summary) {
++        // Best-effort: bump compactionCount for UI/status; ignore failures.
++        try {
++          const agentId = resolveSessionAgentId({ sessionKey, config: cfg });
++          const storePath = resolveStorePath(cfg.session?.store, { agentId });
++          const store = loadSessionStore(storePath);
++          const entry = store[sessionKey];
++          const nextCount = (entry?.compactionCount ?? 0) + 1;
++          const updates: Partial<SessionEntry> = {
++            compactionCount: nextCount,
++            updatedAt: Date.now(),
++          };
++          if (result.result.tokensAfter && result.result.tokensAfter > 0) {
++            updates.totalTokens = result.result.tokensAfter;
++            updates.inputTokens = undefined;
++            updates.outputTokens = undefined;
++          }
++          await updateSessionStore(storePath, (next) => {
++            next[sessionKey] = { ...(next[sessionKey] ?? {}), ...updates };
++          });
++        } catch {
++          // Ignore store update failures.
++        }
++
++        enqueueSystemEvent("Session compacted.", { sessionKey });
++
++        const tokensLine =
++          typeof result.result.tokensBefore === "number"
++            ? `Tokens before: ${result.result.tokensBefore}${
++                typeof result.result.tokensAfter === "number"
++                  ? `; after: ${result.result.tokensAfter}`
++                  : ""
++              }`
++            : undefined;
++
++        const text = [
++          "Session compaction complete.",
++          tokensLine,
++          "",
++          "Summary:",
++          result.result.summary,
++        ]
++          .filter(Boolean)
++          .join("\n");
++
++        return {
++          content: [{ type: "text", text }],
++          details: result,
++        };
++      }
++
++      const reason = result.reason?.trim() || (result.ok ? "not compacted" : "error");
++      return {
++        content: [
++          {
++            type: "text",
++            text: `Session compaction did not run: ${reason}. You can try /compact.`,
++          },
++        ],
++        details: result,
++      };
++    },
++  };
++}
+-- 
+2.50.1 (Apple Git-155)
+
