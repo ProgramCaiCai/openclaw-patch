@@ -1,0 +1,64 @@
+From 506aab88362f954a318cf75fd039f0e265d75578 Mon Sep 17 00:00:00 2001
+From: Yida-Dev <92713555+Yida-Dev@users.noreply.github.com>
+Date: Tue, 10 Feb 2026 09:36:43 +0700
+Subject: [PATCH 07/44] fix: cap Discord gateway reconnect at 50 attempts to
+ prevent infinite loop (#12230)
+
+* fix: cap Discord gateway reconnect attempts to prevent infinite loop
+
+The Discord GatewayPlugin was configured with maxAttempts: Infinity,
+which causes an unbounded reconnection loop when the Discord gateway
+enters a persistent failure state (e.g. code 1005 with stalled HELLO).
+
+In production, this manifested as 2,483+ reconnection attempts in a
+single log file, starving the Node.js event loop and preventing cron,
+heartbeat, and other subsystems from functioning.
+
+Cap maxAttempts at 50, which provides ~25 minutes of retry time
+(with 30s HELLO timeout between attempts) before cleanly exiting
+via the existing "Max reconnect attempts" error handler.
+
+Closes #11836
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+
+* Changelog: note Discord gateway reconnect cap (#12230) (thanks @Yida-Dev)
+
+---------
+
+Co-authored-by: Yida-Dev <reyifeijun@gmail.com>
+Co-authored-by: Claude Opus 4.6 <noreply@anthropic.com>
+Co-authored-by: Shadow <shadow@clawd.bot>
+---
+ CHANGELOG.md                    | 1 +
+ src/discord/monitor/provider.ts | 2 +-
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 580eb71fb..9f7daf560 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -21,6 +21,7 @@ Docs: https://docs.openclaw.ai
+ - Telegram: harden quote parsing; preserve quote context; avoid QUOTE_TEXT_INVALID; avoid nested reply quote misclassification. (#12156) Thanks @rybnikov.
+ - Telegram: recover proactive sends when stale topic thread IDs are used by retrying without `message_thread_id`. (#11620)
+ - Discord: auto-create forum/media thread posts on send, with chunked follow-up replies and media handling for forum sends. (#12380) Thanks @magendary, @thewilloftheshadow.
++- Discord: cap gateway reconnect attempts to avoid infinite retry loops. (#12230) Thanks @Yida-Dev.
+ - Telegram: render markdown spoilers with `<tg-spoiler>` HTML tags. (#11543) Thanks @ezhikkk.
+ - Telegram: truncate command registration to 100 entries to avoid `BOT_COMMANDS_TOO_MUCH` failures on startup. (#12356) Thanks @arosstale.
+ - Telegram: match DM `allowFrom` against sender user id (fallback to chat id) and clarify pairing logs. (#12779) Thanks @liuxiaopai-ai.
+diff --git a/src/discord/monitor/provider.ts b/src/discord/monitor/provider.ts
+index a61016a42..5d9a986c2 100644
+--- a/src/discord/monitor/provider.ts
++++ b/src/discord/monitor/provider.ts
+@@ -504,7 +504,7 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
+     [
+       new GatewayPlugin({
+         reconnect: {
+-          maxAttempts: Number.POSITIVE_INFINITY,
++          maxAttempts: 50,
+         },
+         intents: resolveDiscordGatewayIntents(discordCfg.intents),
+         autoInteractions: true,
+-- 
+2.50.1 (Apple Git-155)
+

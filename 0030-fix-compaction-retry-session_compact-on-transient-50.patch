@@ -1,7 +1,7 @@
-From 24845743ea9bc86b23d3cbca8cfc089aed1874a6 Mon Sep 17 00:00:00 2001
+From b19b39d009b5492726012ee98880b7bd23f1c1df Mon Sep 17 00:00:00 2001
 From: programcaicai <programcaicai@programcaicaideMac-mini.local>
 Date: Wed, 4 Feb 2026 16:55:20 +0800
-Subject: [PATCH 05/12] fix(compaction): retry session_compact on transient 503
+Subject: [PATCH 30/44] fix(compaction): retry session_compact on transient 503
 
 ---
  src/agents/tools/session-compact-tool.ts | 130 +++++++++++++++--------

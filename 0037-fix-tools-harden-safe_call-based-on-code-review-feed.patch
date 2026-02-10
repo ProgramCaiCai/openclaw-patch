@@ -1,7 +1,7 @@
-From 50266fd5a3bfd74ef83d4ae05ac0ab988cf10aa8 Mon Sep 17 00:00:00 2001
+From 81e487a6c6d05571f981ad1d09347eed255819e8 Mon Sep 17 00:00:00 2001
 From: programcaicai <programcaicai@programcaicaideMac-mini.local>
 Date: Tue, 10 Feb 2026 14:35:08 +0800
-Subject: [PATCH 09/12] fix(tools): harden safe_call based on code review
+Subject: [PATCH 37/44] fix(tools): harden safe_call based on code review
  feedback
 
 ---
@@ -181,10 +181,10 @@ index 749a52414..c834e6328 100644
        classifyFailoverReason(
          '{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
 diff --git a/src/agents/pi-embedded-helpers/errors.ts b/src/agents/pi-embedded-helpers/errors.ts
-index 829351e20..01d91f2fa 100644
+index 6138c4d5c..ad6780641 100644
 --- a/src/agents/pi-embedded-helpers/errors.ts
 +++ b/src/agents/pi-embedded-helpers/errors.ts
-@@ -464,6 +464,11 @@ const ERROR_PATTERNS = {
+@@ -469,6 +469,11 @@ const ERROR_PATTERNS = {
      "quota exceeded",
      "resource_exhausted",
      "usage limit",
@@ -1335,10 +1335,10 @@ index 1ed7bcd1c..eef7f42b9 100644
        });
      },
 diff --git a/src/auto-reply/reply/agent-runner-execution.ts b/src/auto-reply/reply/agent-runner-execution.ts
-index 372db8b30..d8eb2e61e 100644
+index 0979f31cc..ec13fa4a5 100644
 --- a/src/auto-reply/reply/agent-runner-execution.ts
 +++ b/src/auto-reply/reply/agent-runner-execution.ts
-@@ -148,10 +148,13 @@ export async function runAgentTurnWithFallback(params: {
+@@ -150,10 +150,13 @@ export async function runAgentTurnWithFallback(params: {
          provider: params.followupRun.run.provider,
          model: params.followupRun.run.model,
          agentDir: params.followupRun.run.agentDir,
@@ -1524,10 +1524,10 @@ index a4363542f..6d1019e8e 100644
      sendPolicy: Type.Optional(
        Type.Union([Type.Literal("allow"), Type.Literal("deny"), Type.Null()]),
 diff --git a/src/gateway/sessions-patch.test.ts b/src/gateway/sessions-patch.test.ts
-index eb109601a..5583a956a 100644
+index 768e3c54d..26f5c4163 100644
 --- a/src/gateway/sessions-patch.test.ts
 +++ b/src/gateway/sessions-patch.test.ts
-@@ -95,4 +95,58 @@ describe("gateway sessions patch", () => {
+@@ -127,4 +127,58 @@ describe("gateway sessions patch", () => {
      expect(res.entry.authProfileOverrideSource).toBeUndefined();
      expect(res.entry.authProfileOverrideCompactionCount).toBeUndefined();
    });
@@ -1587,7 +1587,7 @@ index eb109601a..5583a956a 100644
 +  });
  });
 diff --git a/src/gateway/sessions-patch.ts b/src/gateway/sessions-patch.ts
-index ba2d7bbc0..57608673b 100644
+index c5240b5d1..eba8fd707 100644
 --- a/src/gateway/sessions-patch.ts
 +++ b/src/gateway/sessions-patch.ts
 @@ -58,6 +58,26 @@ function normalizeExecAsk(raw: string): "off" | "on-miss" | "always" | undefined
@@ -1617,7 +1617,7 @@ index ba2d7bbc0..57608673b 100644
  export async function applySessionsPatchToStore(params: {
    cfg: OpenClawConfig;
    store: Record<string, SessionEntry>;
-@@ -298,6 +318,19 @@ export async function applySessionsPatchToStore(params: {
+@@ -295,6 +315,19 @@ export async function applySessionsPatchToStore(params: {
      }
    }
  

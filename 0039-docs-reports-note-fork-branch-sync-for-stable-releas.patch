@@ -1,0 +1,22 @@
+From b31b6deec448c2b6faad6557f0a3ca0e79ea32ed Mon Sep 17 00:00:00 2001
+From: programcaicai <programcaicai@programcaicaideMac-mini.local>
+Date: Tue, 10 Feb 2026 14:44:40 +0800
+Subject: [PATCH 39/44] docs(reports): note fork branch sync for stable release
+
+---
+ reports/openclaw-patch/stable-release.md | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/reports/openclaw-patch/stable-release.md b/reports/openclaw-patch/stable-release.md
+index 5ff308fc5..7d5ce57cf 100644
+--- a/reports/openclaw-patch/stable-release.md
++++ b/reports/openclaw-patch/stable-release.md
+@@ -63,4 +63,4 @@ Executed in `/Users/programcaicai/clawd/projects/openclaw`:
+ 
+ ## Notes
+ 
+-- Push to `openclaw/openclaw` remote branch failed due permission (`403`), so OpenClaw changes are committed locally on `fix/compact-content-normalize`.
++- Push to `openclaw/openclaw` (`origin`) is denied by permission (`403`), but fork sync succeeded on `myfork/fix/compact-content-normalize` (`7e0a80e92`).
+-- 
+2.50.1 (Apple Git-155)
+

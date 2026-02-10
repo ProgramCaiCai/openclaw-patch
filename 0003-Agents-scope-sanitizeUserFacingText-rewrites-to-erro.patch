@@ -1,0 +1,273 @@
+From 4829740a813d328d807b960747cdbda9dcc20138 Mon Sep 17 00:00:00 2001
+From: Tak Hoffman <781889+Takhoffman@users.noreply.github.com>
+Date: Mon, 9 Feb 2026 19:52:24 -0600
+Subject: [PATCH 03/44] Agents: scope sanitizeUserFacingText rewrites to
+ errorContext
+
+Squash-merge #12988.
+
+Refs: #12889 #12309 #3594 #7483 #10094 #10368 #11317 #11359 #11649 #12022 #12432 #12676 #12711
+---
+ CHANGELOG.md                                  |  1 +
+ ...ded-helpers.sanitizeuserfacingtext.test.ts | 21 +++++--
+ src/agents/pi-embedded-helpers/errors.ts      | 57 ++++++++++---------
+ src/agents/pi-embedded-utils.test.ts          | 13 +++++
+ src/agents/pi-embedded-utils.ts               |  5 +-
+ src/agents/tools/sessions-helpers.test.ts     | 10 ++++
+ src/agents/tools/sessions-helpers.ts          |  7 ++-
+ .../reply/agent-runner-execution.ts           |  4 +-
+ src/auto-reply/reply/normalize-reply.ts       |  2 +-
+ 9 files changed, 84 insertions(+), 36 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 7abdd13ca..595bfd14a 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -30,6 +30,7 @@ Docs: https://docs.openclaw.ai
+ - Tools/web_search: normalize direct Perplexity model IDs while keeping OpenRouter model IDs unchanged. (#12795) Thanks @cdorsey.
+ - Model failover: treat HTTP 400 errors as failover-eligible, enabling automatic model fallback. (#1879) Thanks @orenyomtov.
+ - Errors: prevent false positive context overflow detection when conversation mentions "context overflow" topic. (#2078) Thanks @sbking.
++- Errors: avoid rewriting/swallowing normal assistant replies that mention error keywords by scoping `sanitizeUserFacingText` rewrites to error-context. (#12988) Thanks @Takhoffman.
+ - Config: re-hydrate state-dir `.env` during runtime config loads so `${VAR}` substitutions remain resolvable. (#12748) Thanks @rodrigouroz.
+ - Gateway: no more post-compaction amnesia; injected transcript writes now preserve Pi session `parentId` chain so agents can remember again. (#12283) Thanks @Takhoffman.
+ - Gateway: fix multi-agent sessions.usage discovery. (#11523) Thanks @Takhoffman.
+diff --git a/src/agents/pi-embedded-helpers.sanitizeuserfacingtext.test.ts b/src/agents/pi-embedded-helpers.sanitizeuserfacingtext.test.ts
+index 5b4214611..3f975ce02 100644
+--- a/src/agents/pi-embedded-helpers.sanitizeuserfacingtext.test.ts
++++ b/src/agents/pi-embedded-helpers.sanitizeuserfacingtext.test.ts
+@@ -13,12 +13,12 @@ describe("sanitizeUserFacingText", () => {
+   });
+ 
+   it("sanitizes role ordering errors", () => {
+-    const result = sanitizeUserFacingText("400 Incorrect role information");
++    const result = sanitizeUserFacingText("400 Incorrect role information", { errorContext: true });
+     expect(result).toContain("Message ordering conflict");
+   });
+ 
+   it("sanitizes HTTP status errors with error hints", () => {
+-    expect(sanitizeUserFacingText("500 Internal Server Error")).toBe(
++    expect(sanitizeUserFacingText("500 Internal Server Error", { errorContext: true })).toBe(
+       "HTTP 500: Internal Server Error",
+     );
+   });
+@@ -27,11 +27,18 @@ describe("sanitizeUserFacingText", () => {
+     expect(
+       sanitizeUserFacingText(
+         "Context overflow: prompt too large for the model. Try again with less input or a larger-context model.",
++        { errorContext: true },
+       ),
+     ).toContain("Context overflow: prompt too large for the model.");
+-    expect(sanitizeUserFacingText("Request size exceeds model context window")).toContain(
+-      "Context overflow: prompt too large for the model.",
+-    );
++    expect(
++      sanitizeUserFacingText("Request size exceeds model context window", { errorContext: true }),
++    ).toContain("Context overflow: prompt too large for the model.");
++  });
++
++  it("does not swallow assistant text that quotes the canonical context-overflow string", () => {
++    const text =
++      "Changelog note: we fixed false positives for `Context overflow: prompt too large for the model. Try again with less input or a larger-context model.` in 2026.2.9";
++    expect(sanitizeUserFacingText(text)).toBe(text);
+   });
+ 
+   it("does not rewrite conversational mentions of context overflow", () => {
+@@ -48,7 +55,9 @@ describe("sanitizeUserFacingText", () => {
+ 
+   it("sanitizes raw API error payloads", () => {
+     const raw = '{"type":"error","error":{"message":"Something exploded","type":"server_error"}}';
+-    expect(sanitizeUserFacingText(raw)).toBe("LLM error server_error: Something exploded");
++    expect(sanitizeUserFacingText(raw, { errorContext: true })).toBe(
++      "LLM error server_error: Something exploded",
++    );
+   });
+ 
+   it("collapses consecutive duplicate paragraphs", () => {
+diff --git a/src/agents/pi-embedded-helpers/errors.ts b/src/agents/pi-embedded-helpers/errors.ts
+index 129de9480..1e2b232ec 100644
+--- a/src/agents/pi-embedded-helpers/errors.ts
++++ b/src/agents/pi-embedded-helpers/errors.ts
+@@ -402,46 +402,51 @@ export function formatAssistantErrorText(
+   return raw.length > 600 ? `${raw.slice(0, 600)}…` : raw;
+ }
+ 
+-export function sanitizeUserFacingText(text: string): string {
++export function sanitizeUserFacingText(text: string, opts?: { errorContext?: boolean }): string {
+   if (!text) {
+     return text;
+   }
++  const errorContext = opts?.errorContext ?? false;
+   const stripped = stripFinalTagsFromText(text);
+   const trimmed = stripped.trim();
+   if (!trimmed) {
+     return stripped;
+   }
+ 
+-  if (/incorrect role information|roles must alternate/i.test(trimmed)) {
+-    return (
+-      "Message ordering conflict - please try again. " +
+-      "If this persists, use /new to start a fresh session."
+-    );
+-  }
+-
+-  if (shouldRewriteContextOverflowText(trimmed)) {
+-    return (
+-      "Context overflow: prompt too large for the model. " +
+-      "Try again with less input or a larger-context model."
+-    );
+-  }
++  // Only apply error-pattern rewrites when the caller knows this text is an error payload.
++  // Otherwise we risk swallowing legitimate assistant text that merely *mentions* these errors.
++  if (errorContext) {
++    if (/incorrect role information|roles must alternate/i.test(trimmed)) {
++      return (
++        "Message ordering conflict - please try again. " +
++        "If this persists, use /new to start a fresh session."
++      );
++    }
+ 
+-  if (isBillingErrorMessage(trimmed)) {
+-    return BILLING_ERROR_USER_MESSAGE;
+-  }
++    if (shouldRewriteContextOverflowText(trimmed)) {
++      return (
++        "Context overflow: prompt too large for the model. " +
++        "Try again with less input or a larger-context model."
++      );
++    }
+ 
+-  if (isRawApiErrorPayload(trimmed) || isLikelyHttpErrorText(trimmed)) {
+-    return formatRawAssistantErrorForUi(trimmed);
+-  }
++    if (isBillingErrorMessage(trimmed)) {
++      return BILLING_ERROR_USER_MESSAGE;
++    }
+ 
+-  if (ERROR_PREFIX_RE.test(trimmed)) {
+-    if (isOverloadedErrorMessage(trimmed) || isRateLimitErrorMessage(trimmed)) {
+-      return "The AI service is temporarily overloaded. Please try again in a moment.";
++    if (isRawApiErrorPayload(trimmed) || isLikelyHttpErrorText(trimmed)) {
++      return formatRawAssistantErrorForUi(trimmed);
+     }
+-    if (isTimeoutErrorMessage(trimmed)) {
+-      return "LLM request timed out.";
++
++    if (ERROR_PREFIX_RE.test(trimmed)) {
++      if (isOverloadedErrorMessage(trimmed) || isRateLimitErrorMessage(trimmed)) {
++        return "The AI service is temporarily overloaded. Please try again in a moment.";
++      }
++      if (isTimeoutErrorMessage(trimmed)) {
++        return "LLM request timed out.";
++      }
++      return formatRawAssistantErrorForUi(trimmed);
+     }
+-    return formatRawAssistantErrorForUi(trimmed);
+   }
+ 
+   return collapseConsecutiveDuplicateBlocks(stripped);
+diff --git a/src/agents/pi-embedded-utils.test.ts b/src/agents/pi-embedded-utils.test.ts
+index cca7f8cb4..3d18a07fd 100644
+--- a/src/agents/pi-embedded-utils.test.ts
++++ b/src/agents/pi-embedded-utils.test.ts
+@@ -75,6 +75,19 @@ describe("extractAssistantText", () => {
+     expect(result).toBe("This is a normal response without any tool calls.");
+   });
+ 
++  it("sanitizes HTTP-ish error text only when stopReason is error", () => {
++    const msg: AssistantMessage = {
++      role: "assistant",
++      stopReason: "error",
++      errorMessage: "500 Internal Server Error",
++      content: [{ type: "text", text: "500 Internal Server Error" }],
++      timestamp: Date.now(),
++    };
++
++    const result = extractAssistantText(msg);
++    expect(result).toBe("HTTP 500: Internal Server Error");
++  });
++
+   it("strips Minimax tool invocations with extra attributes", () => {
+     const msg: AssistantMessage = {
+       role: "assistant",
+diff --git a/src/agents/pi-embedded-utils.ts b/src/agents/pi-embedded-utils.ts
+index d95b90707..0e0310ef9 100644
+--- a/src/agents/pi-embedded-utils.ts
++++ b/src/agents/pi-embedded-utils.ts
+@@ -218,7 +218,10 @@ export function extractAssistantText(msg: AssistantMessage): string {
+         .filter(Boolean)
+     : [];
+   const extracted = blocks.join("\n").trim();
+-  return sanitizeUserFacingText(extracted);
++  // Only apply keyword-based error rewrites when the assistant message is actually an error.
++  // Otherwise normal prose that *mentions* errors (e.g. "context overflow") can get clobbered.
++  const errorContext = msg.stopReason === "error" || Boolean(msg.errorMessage?.trim());
++  return sanitizeUserFacingText(extracted, { errorContext });
+ }
+ 
+ export function extractAssistantThinking(msg: AssistantMessage): string {
+diff --git a/src/agents/tools/sessions-helpers.test.ts b/src/agents/tools/sessions-helpers.test.ts
+index 34c85d646..e87a990a6 100644
+--- a/src/agents/tools/sessions-helpers.test.ts
++++ b/src/agents/tools/sessions-helpers.test.ts
+@@ -30,4 +30,14 @@ describe("extractAssistantText", () => {
+     };
+     expect(extractAssistantText(message)).toBe("Hi there");
+   });
++
++  it("rewrites error-ish assistant text only when the transcript marks it as an error", () => {
++    const message = {
++      role: "assistant",
++      stopReason: "error",
++      errorMessage: "500 Internal Server Error",
++      content: [{ type: "text", text: "500 Internal Server Error" }],
++    };
++    expect(extractAssistantText(message)).toBe("HTTP 500: Internal Server Error");
++  });
+ });
+diff --git a/src/agents/tools/sessions-helpers.ts b/src/agents/tools/sessions-helpers.ts
+index 30a287e88..64680cc7f 100644
+--- a/src/agents/tools/sessions-helpers.ts
++++ b/src/agents/tools/sessions-helpers.ts
+@@ -389,5 +389,10 @@ export function extractAssistantText(message: unknown): string | undefined {
+     }
+   }
+   const joined = chunks.join("").trim();
+-  return joined ? sanitizeUserFacingText(joined) : undefined;
++  const stopReason = (message as { stopReason?: unknown }).stopReason;
++  const errorMessage = (message as { errorMessage?: unknown }).errorMessage;
++  const errorContext =
++    stopReason === "error" || (typeof errorMessage === "string" && Boolean(errorMessage.trim()));
++
++  return joined ? sanitizeUserFacingText(joined, { errorContext }) : undefined;
+ }
+diff --git a/src/auto-reply/reply/agent-runner-execution.ts b/src/auto-reply/reply/agent-runner-execution.ts
+index 372db8b30..0979f31cc 100644
+--- a/src/auto-reply/reply/agent-runner-execution.ts
++++ b/src/auto-reply/reply/agent-runner-execution.ts
+@@ -127,7 +127,9 @@ export async function runAgentTurnWithFallback(params: {
+         if (!text) {
+           return { skip: true };
+         }
+-        const sanitized = sanitizeUserFacingText(text);
++        const sanitized = sanitizeUserFacingText(text, {
++          errorContext: Boolean(payload.isError),
++        });
+         if (!sanitized.trim()) {
+           return { skip: true };
+         }
+diff --git a/src/auto-reply/reply/normalize-reply.ts b/src/auto-reply/reply/normalize-reply.ts
+index ec4441684..6846cacbb 100644
+--- a/src/auto-reply/reply/normalize-reply.ts
++++ b/src/auto-reply/reply/normalize-reply.ts
+@@ -62,7 +62,7 @@ export function normalizeReplyPayload(
+   }
+ 
+   if (text) {
+-    text = sanitizeUserFacingText(text);
++    text = sanitizeUserFacingText(text, { errorContext: Boolean(payload.isError) });
+   }
+   if (!text?.trim() && !hasMedia && !hasChannelData) {
+     opts.onSkip?.("empty");
+-- 
+2.50.1 (Apple Git-155)
+

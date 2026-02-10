@@ -1,7 +1,7 @@
-From 6f410ceff0792ef594ce7224b469a77ad311402a Mon Sep 17 00:00:00 2001
+From 272683f128e030628d9cec9c68085c1d186a86d5 Mon Sep 17 00:00:00 2001
 From: programcaicai <programcaicai@programcaicaideMac-mini.local>
 Date: Wed, 4 Feb 2026 15:25:56 +0800
-Subject: [PATCH 01/12] feat(compaction): add session_compact tool
+Subject: [PATCH 26/44] feat(compaction): add session_compact tool
 
 ---
  src/agents/openclaw-tools.ts                 |   8 ++
@@ -46,7 +46,7 @@ index b38645f14..75292315c 100644
      ...(webFetchTool ? [webFetchTool] : []),
      ...(imageTool ? [imageTool] : []),
 diff --git a/src/agents/pi-embedded-runner/run/attempt.ts b/src/agents/pi-embedded-runner/run/attempt.ts
-index f195150a0..9c17984a7 100644
+index 086b11fae..6552df727 100644
 --- a/src/agents/pi-embedded-runner/run/attempt.ts
 +++ b/src/agents/pi-embedded-runner/run/attempt.ts
 @@ -1,7 +1,12 @@

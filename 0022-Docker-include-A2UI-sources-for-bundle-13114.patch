@@ -1,0 +1,72 @@
+From a428e9a1959bd4f78804378f5aa4710d82279a6b Mon Sep 17 00:00:00 2001
+From: Tak Hoffman <781889+Takhoffman@users.noreply.github.com>
+Date: Mon, 9 Feb 2026 22:44:59 -0600
+Subject: [PATCH 22/44] Docker: include A2UI sources for bundle (#13114)
+
+* Docker: include A2UI sources for bundle
+
+* Build: fail bundling when sources missing and no prebuilt A2UI bundle
+---
+ .dockerignore          | 12 ++++++++++++
+ Dockerfile             |  2 +-
+ scripts/bundle-a2ui.sh | 10 +++++++---
+ 3 files changed, 20 insertions(+), 4 deletions(-)
+
+diff --git a/.dockerignore b/.dockerignore
+index af1dfc73a..73d00fff1 100644
+--- a/.dockerignore
++++ b/.dockerignore
+@@ -46,3 +46,15 @@ Swabble/
+ Core/
+ Users/
+ vendor/
++
++# Needed for building the Canvas A2UI bundle during Docker image builds.
++# Keep the rest of apps/ and vendor/ excluded to avoid a large build context.
++!apps/shared/
++!apps/shared/OpenClawKit/
++!apps/shared/OpenClawKit/Tools/
++!apps/shared/OpenClawKit/Tools/CanvasA2UI/
++!apps/shared/OpenClawKit/Tools/CanvasA2UI/**
++!vendor/a2ui/
++!vendor/a2ui/renderers/
++!vendor/a2ui/renderers/lit/
++!vendor/a2ui/renderers/lit/**
+diff --git a/Dockerfile b/Dockerfile
+index 237a6a238..716ab2099 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -24,7 +24,7 @@ COPY scripts ./scripts
+ RUN pnpm install --frozen-lockfile
+ 
+ COPY . .
+-RUN OPENCLAW_A2UI_SKIP_MISSING=1 pnpm build
++RUN pnpm build
+ # Force pnpm for UI build (Bun may fail on ARM/Synology architectures)
+ ENV OPENCLAW_PREFER_PNPM=1
+ RUN pnpm ui:build
+diff --git a/scripts/bundle-a2ui.sh b/scripts/bundle-a2ui.sh
+index 393685830..aeade1b06 100755
+--- a/scripts/bundle-a2ui.sh
++++ b/scripts/bundle-a2ui.sh
+@@ -14,10 +14,14 @@ A2UI_RENDERER_DIR="$ROOT_DIR/vendor/a2ui/renderers/lit"
+ A2UI_APP_DIR="$ROOT_DIR/apps/shared/OpenClawKit/Tools/CanvasA2UI"
+ 
+ # Docker builds exclude vendor/apps via .dockerignore.
+-# In that environment we must keep the prebuilt bundle.
++# In that environment we can keep a prebuilt bundle only if it exists.
+ if [[ ! -d "$A2UI_RENDERER_DIR" || ! -d "$A2UI_APP_DIR" ]]; then
+-  echo "A2UI sources missing; keeping prebuilt bundle."
+-  exit 0
++  if [[ -f "$OUTPUT_FILE" ]]; then
++    echo "A2UI sources missing; keeping prebuilt bundle."
++    exit 0
++  fi
++  echo "A2UI sources missing and no prebuilt bundle found at: $OUTPUT_FILE" >&2
++  exit 1
+ fi
+ 
+ INPUT_PATHS=(
+-- 
+2.50.1 (Apple Git-155)
+

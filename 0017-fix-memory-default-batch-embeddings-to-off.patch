@@ -1,0 +1,106 @@
+From 2c4ab1a8473099c03abd584b99ae8648e25b4d93 Mon Sep 17 00:00:00 2001
+From: Jake <mcinteerj@gmail.com>
+Date: Tue, 10 Feb 2026 17:31:58 +1300
+Subject: [PATCH 17/44] fix(memory): default batch embeddings to off
+
+Disables async batch embeddings by default for memory indexing; batch remains opt-in via agents.defaults.memorySearch.remote.batch.enabled.
+
+(#13069) Thanks @mcinteerj.
+
+Co-authored-by: Jake McInteer <mcinteerj@gmail.com>
+---
+ CHANGELOG.md                     | 1 +
+ docs/concepts/memory.md          | 4 ++--
+ src/agents/memory-search.test.ts | 6 +++---
+ src/agents/memory-search.ts      | 2 +-
+ src/config/schema.ts             | 2 +-
+ 5 files changed, 8 insertions(+), 7 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 00e64bf00..ade370d10 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -53,6 +53,7 @@ Docs: https://docs.openclaw.ai
+ - Discord: support forum/media thread-create starter messages, wire `message thread create --message`, and harden routing. (#10062) Thanks @jarvis89757.
+ - Paths: structurally resolve `OPENCLAW_HOME`-derived home paths and fix Windows drive-letter handling in tool meta shortening. (#12125) Thanks @mcaxtr.
+ - Memory: set Voyage embeddings `input_type` for improved retrieval. (#10818) Thanks @mcinteerj.
++- Memory: disable async batch embeddings by default for memory indexing (opt-in via `agents.defaults.memorySearch.remote.batch.enabled`). (#13069) Thanks @mcinteerj.
+ - Memory/QMD: reuse default model cache across agents instead of re-downloading per agent. (#12114) Thanks @tyler6204.
+ - Media understanding: recognize `.caf` audio attachments for transcription. (#10982) Thanks @succ985.
+ - State dir: honor `OPENCLAW_STATE_DIR` for default device identity and canvas storage paths. (#4824) Thanks @kossoy.
+diff --git a/docs/concepts/memory.md b/docs/concepts/memory.md
+index 039f51c61..5b97015a1 100644
+--- a/docs/concepts/memory.md
++++ b/docs/concepts/memory.md
+@@ -302,9 +302,9 @@ Fallbacks:
+ - `memorySearch.fallback` can be `openai`, `gemini`, `local`, or `none`.
+ - The fallback provider is only used when the primary embedding provider fails.
+ 
+-Batch indexing (OpenAI + Gemini):
++Batch indexing (OpenAI + Gemini + Voyage):
+ 
+-- Enabled by default for OpenAI and Gemini embeddings. Set `agents.defaults.memorySearch.remote.batch.enabled = false` to disable.
++- Disabled by default. Set `agents.defaults.memorySearch.remote.batch.enabled = true` to enable for large-corpus indexing (OpenAI, Gemini, and Voyage).
+ - Default behavior waits for batch completion; tune `remote.batch.wait`, `remote.batch.pollIntervalMs`, and `remote.batch.timeoutMinutes` if needed.
+ - Set `remote.batch.concurrency` to control how many batch jobs we submit in parallel (default: 2).
+ - Batch mode applies when `memorySearch.provider = "openai"` or `"gemini"` and uses the corresponding API key.
+diff --git a/src/agents/memory-search.test.ts b/src/agents/memory-search.test.ts
+index 538b18598..7ff5c0a8b 100644
+--- a/src/agents/memory-search.test.ts
++++ b/src/agents/memory-search.test.ts
+@@ -116,7 +116,7 @@ describe("memory search config", () => {
+     };
+     const resolved = resolveMemorySearchConfig(cfg, "main");
+     expect(resolved?.remote?.batch).toEqual({
+-      enabled: true,
++      enabled: false,
+       wait: true,
+       concurrency: 2,
+       pollIntervalMs: 2000,
+@@ -150,7 +150,7 @@ describe("memory search config", () => {
+     };
+     const resolved = resolveMemorySearchConfig(cfg, "main");
+     expect(resolved?.remote?.batch).toEqual({
+-      enabled: true,
++      enabled: false,
+       wait: true,
+       concurrency: 2,
+       pollIntervalMs: 2000,
+@@ -207,7 +207,7 @@ describe("memory search config", () => {
+       apiKey: "default-key",
+       headers: { "X-Default": "on" },
+       batch: {
+-        enabled: true,
++        enabled: false,
+         wait: true,
+         concurrency: 2,
+         pollIntervalMs: 2000,
+diff --git a/src/agents/memory-search.ts b/src/agents/memory-search.ts
+index 5394b640d..df8e9f64b 100644
+--- a/src/agents/memory-search.ts
++++ b/src/agents/memory-search.ts
+@@ -143,7 +143,7 @@ function mergeConfig(
+     provider === "voyage" ||
+     provider === "auto";
+   const batch = {
+-    enabled: overrideRemote?.batch?.enabled ?? defaultRemote?.batch?.enabled ?? true,
++    enabled: overrideRemote?.batch?.enabled ?? defaultRemote?.batch?.enabled ?? false,
+     wait: overrideRemote?.batch?.wait ?? defaultRemote?.batch?.wait ?? true,
+     concurrency: Math.max(
+       1,
+diff --git a/src/config/schema.ts b/src/config/schema.ts
+index 605c3b247..91a143ba0 100644
+--- a/src/config/schema.ts
++++ b/src/config/schema.ts
+@@ -554,7 +554,7 @@ const FIELD_HELP: Record<string, string> = {
+   "agents.defaults.memorySearch.remote.headers":
+     "Extra headers for remote embeddings (merged; remote overrides OpenAI headers).",
+   "agents.defaults.memorySearch.remote.batch.enabled":
+-    "Enable batch API for memory embeddings (OpenAI/Gemini; default: true).",
++    "Enable batch API for memory embeddings (OpenAI/Gemini/Voyage; default: false).",
+   "agents.defaults.memorySearch.remote.batch.wait":
+     "Wait for batch completion when indexing (default: true).",
+   "agents.defaults.memorySearch.remote.batch.concurrency":
+-- 
+2.50.1 (Apple Git-155)
+

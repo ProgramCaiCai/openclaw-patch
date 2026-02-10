@@ -1,0 +1,141 @@
+From 44a340898b1342c03601aeaa54ff87bba33c6abb Mon Sep 17 00:00:00 2001
+From: Marcus Castro <mcaxtr@gmail.com>
+Date: Tue, 10 Feb 2026 02:02:54 -0300
+Subject: [PATCH 24/44] fix(ui): prioritize displayName over label in webchat
+ session picker (#13108)
+
+* fix(ui): prioritize displayName over label in webchat session picker
+
+The session picker dropdown in the webchat UI was showing raw session
+keys instead of human-readable display names. resolveSessionDisplayName()
+checked label before displayName and formatted displayName-based entries
+as key (displayName) instead of displayName (key).
+
+Swap the priority so displayName is checked first, and use a consistent
+humanName (key) format for both displayName and label fallbacks.
+
+Fixes #6645
+
+* test: use deterministic updatedAt in session display name tests
+---
+ ui/src/ui/app-render.helpers.node.test.ts | 79 +++++++++++++++++++++++
+ ui/src/ui/app-render.helpers.ts           | 13 ++--
+ 2 files changed, 87 insertions(+), 5 deletions(-)
+ create mode 100644 ui/src/ui/app-render.helpers.node.test.ts
+
+diff --git a/ui/src/ui/app-render.helpers.node.test.ts b/ui/src/ui/app-render.helpers.node.test.ts
+new file mode 100644
+index 000000000..c386ccc0f
+--- /dev/null
++++ b/ui/src/ui/app-render.helpers.node.test.ts
+@@ -0,0 +1,79 @@
++import { describe, expect, it } from "vitest";
++import type { SessionsListResult } from "./types.ts";
++import { resolveSessionDisplayName } from "./app-render.helpers.ts";
++
++type SessionRow = SessionsListResult["sessions"][number];
++
++function row(overrides: Partial<SessionRow> & { key: string }): SessionRow {
++  return { kind: "direct", updatedAt: 0, ...overrides };
++}
++
++describe("resolveSessionDisplayName", () => {
++  it("returns key when no row is provided", () => {
++    expect(resolveSessionDisplayName("agent:main:main")).toBe("agent:main:main");
++  });
++
++  it("returns key when row has no label or displayName", () => {
++    expect(resolveSessionDisplayName("agent:main:main", row({ key: "agent:main:main" }))).toBe(
++      "agent:main:main",
++    );
++  });
++
++  it("returns key when displayName matches key", () => {
++    expect(resolveSessionDisplayName("mykey", row({ key: "mykey", displayName: "mykey" }))).toBe(
++      "mykey",
++    );
++  });
++
++  it("returns key when label matches key", () => {
++    expect(resolveSessionDisplayName("mykey", row({ key: "mykey", label: "mykey" }))).toBe("mykey");
++  });
++
++  it("uses displayName prominently when available", () => {
++    expect(
++      resolveSessionDisplayName(
++        "discord:123:456",
++        row({ key: "discord:123:456", displayName: "My Chat" }),
++      ),
++    ).toBe("My Chat (discord:123:456)");
++  });
++
++  it("falls back to label when displayName is absent", () => {
++    expect(
++      resolveSessionDisplayName(
++        "discord:123:456",
++        row({ key: "discord:123:456", label: "General" }),
++      ),
++    ).toBe("General (discord:123:456)");
++  });
++
++  it("prefers displayName over label when both are present", () => {
++    expect(
++      resolveSessionDisplayName(
++        "discord:123:456",
++        row({ key: "discord:123:456", displayName: "My Chat", label: "General" }),
++      ),
++    ).toBe("My Chat (discord:123:456)");
++  });
++
++  it("ignores whitespace-only displayName", () => {
++    expect(
++      resolveSessionDisplayName(
++        "discord:123:456",
++        row({ key: "discord:123:456", displayName: "   ", label: "General" }),
++      ),
++    ).toBe("General (discord:123:456)");
++  });
++
++  it("ignores whitespace-only label", () => {
++    expect(
++      resolveSessionDisplayName("discord:123:456", row({ key: "discord:123:456", label: "   " })),
++    ).toBe("discord:123:456");
++  });
++
++  it("trims displayName and label", () => {
++    expect(resolveSessionDisplayName("k", row({ key: "k", displayName: "  My Chat  " }))).toBe(
++      "My Chat (k)",
++    );
++  });
++});
+diff --git a/ui/src/ui/app-render.helpers.ts b/ui/src/ui/app-render.helpers.ts
+index eaf6eabdc..c941bdfa4 100644
+--- a/ui/src/ui/app-render.helpers.ts
++++ b/ui/src/ui/app-render.helpers.ts
+@@ -219,15 +219,18 @@ function resolveMainSessionKey(
+   return null;
+ }
+ 
+-function resolveSessionDisplayName(key: string, row?: SessionsListResult["sessions"][number]) {
+-  const label = row?.label?.trim() || "";
++export function resolveSessionDisplayName(
++  key: string,
++  row?: SessionsListResult["sessions"][number],
++) {
+   const displayName = row?.displayName?.trim() || "";
++  const label = row?.label?.trim() || "";
++  if (displayName && displayName !== key) {
++    return `${displayName} (${key})`;
++  }
+   if (label && label !== key) {
+     return `${label} (${key})`;
+   }
+-  if (displayName && displayName !== key) {
+-    return `${key} (${displayName})`;
+-  }
+   return key;
+ }
+ 
+-- 
+2.50.1 (Apple Git-155)
+

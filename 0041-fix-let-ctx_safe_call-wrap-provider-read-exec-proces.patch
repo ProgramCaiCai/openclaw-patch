@@ -1,0 +1,239 @@
+From cc8dbd1b975612a4c7cd30e7b56540e2dcb736ca Mon Sep 17 00:00:00 2001
+From: programcaicai <programcaicai@programcaicaideMac-mini.local>
+Date: Tue, 10 Feb 2026 17:59:58 +0800
+Subject: [PATCH 41/44] fix: let ctx_safe_call wrap provider read/exec/process
+
+---
+ .../ctx-safe-call-provider-tools/report.md    | 40 +++++++++
+ src/agents/openclaw-tools.ts                  | 25 ++++--
+ ...tools.ctx-safe-call-provider-tools.test.ts | 88 +++++++++++++++++++
+ src/agents/pi-tools.ts                        |  6 ++
+ 4 files changed, 153 insertions(+), 6 deletions(-)
+ create mode 100644 reports/ctx-safe-call-provider-tools/report.md
+ create mode 100644 src/agents/pi-tools.ctx-safe-call-provider-tools.test.ts
+
+diff --git a/reports/ctx-safe-call-provider-tools/report.md b/reports/ctx-safe-call-provider-tools/report.md
+new file mode 100644
+index 000000000..a367ac638
+--- /dev/null
++++ b/reports/ctx-safe-call-provider-tools/report.md
+@@ -0,0 +1,40 @@
++# ctx_safe_call provider tools support report
++
++## Scope
++
++Implemented support for `ctx_safe_call` to resolve and wrap provider-layer tools: `read`, `exec`, and `process`.
++
++## Changes made
++
++- Updated `src/agents/openclaw-tools.ts`
++  - Added new optional `createOpenClawTools` option: `ctxSafeCallProviderTools?: AnyAgentTool[]`.
++  - Extended `ctx_safe_call` resolver to:
++    1. Resolve normal OpenClaw/plugin tools first (existing behavior).
++    2. Fallback to provider tools for names in `{read, exec, process}` via `ctxSafeCallProviderTools`.
++
++- Updated `src/agents/pi-tools.ts`
++  - Built a `ctxSafeCallProviderTools` list from the actual runtime tool instances:
++    - `read` (from `base`)
++    - `exec` (created by `createExecTool`)
++    - `process` (created by `createProcessTool`)
++  - Passed that list into `createOpenClawTools(...)` so `ctx_safe_call` receives executable provider tool objects.
++
++- Added tests: `src/agents/pi-tools.ctx-safe-call-provider-tools.test.ts`
++  - `wraps read`
++  - `wraps exec`
++  - `wraps process`
++
++## Validation
++
++Executed:
++
++- `npx vitest run src/agents/tools/ctx-safe-call-tool.test.ts`
++  - Result: 15 passed
++- `npx vitest run src/agents/pi-tools.ctx-safe-call-provider-tools.test.ts`
++  - Result: 3 passed
++- `npm run build`
++  - Result: success
++
++## Notes
++
++- Resolver fallback is intentionally limited to `read/exec/process` to keep behavior scoped and avoid unintentionally broadening ctx wrapping for other provider tools.
+diff --git a/src/agents/openclaw-tools.ts b/src/agents/openclaw-tools.ts
+index 15dfc8250..15b3075b3 100644
+--- a/src/agents/openclaw-tools.ts
++++ b/src/agents/openclaw-tools.ts
+@@ -7,11 +7,11 @@ import { createAgentsListTool } from "./tools/agents-list-tool.js";
+ import { createBrowserTool } from "./tools/browser-tool.js";
+ import { createCanvasTool } from "./tools/canvas-tool.js";
+ import { createCronTool } from "./tools/cron-tool.js";
++import { createCtxSafeCallTool } from "./tools/ctx-safe-call-tool.js";
+ import { createGatewayTool } from "./tools/gateway-tool.js";
+ import { createImageTool } from "./tools/image-tool.js";
+ import { createMessageTool } from "./tools/message-tool.js";
+ import { createNodesTool } from "./tools/nodes-tool.js";
+-import { createSafeCallTool } from "./tools/safe-call-tool.js";
+ import { createSessionCompactTool } from "./tools/session-compact-tool.js";
+ import { createSessionStatusTool } from "./tools/session-status-tool.js";
+ import { createSessionsHistoryTool } from "./tools/sessions-history-tool.js";
+@@ -61,6 +61,8 @@ export function createOpenClawTools(options?: {
+   requireExplicitMessageTarget?: boolean;
+   /** If true, omit the message tool from the tool list. */
+   disableMessageTool?: boolean;
++  /** Additional provider-layer tools that ctx_safe_call can wrap (e.g. read/exec/process). */
++  ctxSafeCallProviderTools?: AnyAgentTool[];
+ }): AnyAgentTool[] {
+   const imageTool = options?.agentDir?.trim()
+     ? createImageTool({
+@@ -173,15 +175,26 @@ export function createOpenClawTools(options?: {
+       agentAccountId: options?.agentAccountId,
+       sandboxed: options?.sandboxed,
+     },
+-    existingToolNames: new Set([...coreTools.map((tool) => tool.name), "safe_call"]),
++    existingToolNames: new Set([...coreTools.map((tool) => tool.name), "ctx_safe_call"]),
+     toolAllowlist: options?.pluginToolAllowlist,
+   });
+ 
+   const wrappedTools = [...coreTools, ...pluginTools];
+-  const safeCallTool = createSafeCallTool({
+-    resolveTool: (name) =>
+-      wrappedTools.find((tool) => tool.name === name && tool.name !== "safe_call"),
++  const providerToolNames = new Set(["read", "exec", "process"]);
++  const ctxSafeCallTool = createCtxSafeCallTool({
++    resolveTool: (name) => {
++      const wrapped = wrappedTools.find(
++        (tool) => tool.name === name && tool.name !== "ctx_safe_call",
++      );
++      if (wrapped) {
++        return wrapped;
++      }
++      if (!providerToolNames.has(name)) {
++        return undefined;
++      }
++      return options?.ctxSafeCallProviderTools?.find((tool) => tool.name === name);
++    },
+   });
+ 
+-  return [...wrappedTools, safeCallTool];
++  return [...wrappedTools, ctxSafeCallTool];
+ }
+diff --git a/src/agents/pi-tools.ctx-safe-call-provider-tools.test.ts b/src/agents/pi-tools.ctx-safe-call-provider-tools.test.ts
+new file mode 100644
+index 000000000..85c37bd5c
+--- /dev/null
++++ b/src/agents/pi-tools.ctx-safe-call-provider-tools.test.ts
+@@ -0,0 +1,88 @@
++import fs from "node:fs/promises";
++import os from "node:os";
++import path from "node:path";
++import { describe, expect, it, vi } from "vitest";
++import { createOpenClawCodingTools } from "./pi-tools.js";
++
++vi.mock("../plugins/tools.js", () => ({
++  getPluginToolMeta: () => undefined,
++  resolvePluginTools: () => [],
++}));
++
++vi.mock("../infra/shell-env.js", async (importOriginal) => {
++  const mod = await importOriginal<typeof import("../infra/shell-env.js")>();
++  return { ...mod, getShellPathFromLoginShell: () => null };
++});
++
++async function withTempDir<T>(prefix: string, fn: (dir: string) => Promise<T>) {
++  const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
++  try {
++    return await fn(dir);
++  } finally {
++    await fs.rm(dir, { recursive: true, force: true });
++  }
++}
++
++function getCtxSafeCallTool(workspaceDir: string) {
++  const tools = createOpenClawCodingTools({ workspaceDir });
++  const tool = tools.find((candidate) => candidate.name === "ctx_safe_call");
++  expect(tool).toBeDefined();
++  if (!tool) {
++    throw new Error("missing ctx_safe_call tool");
++  }
++  return tool;
++}
++
++describe("ctx_safe_call provider tools", () => {
++  it("wraps read", async () => {
++    await withTempDir("openclaw-ctx-read-", async (workspaceDir) => {
++      await fs.writeFile(path.join(workspaceDir, "note.txt"), "ctx-read-ok", "utf8");
++      const ctxSafeCall = getCtxSafeCallTool(workspaceDir);
++
++      const result = await ctxSafeCall.execute("ctx-read", {
++        tool: "read",
++        params: { path: "note.txt" },
++      });
++
++      const details = result.details as { tool: string; output: string };
++      expect(details.tool).toBe("read");
++      expect(details.output).toContain("ctx-read-ok");
++    });
++  });
++
++  it("wraps exec", async () => {
++    await withTempDir("openclaw-ctx-exec-", async (workspaceDir) => {
++      const ctxSafeCall = getCtxSafeCallTool(workspaceDir);
++
++      const result = await ctxSafeCall.execute("ctx-exec", {
++        tool: "exec",
++        params: { command: "printf 'ctx-exec-ok'" },
++      });
++
++      const details = result.details as { tool: string; output: string };
++      expect(details.tool).toBe("exec");
++      expect(details.output).toContain("ctx-exec-ok");
++    });
++  });
++
++  it("wraps process", async () => {
++    await withTempDir("openclaw-ctx-process-", async (workspaceDir) => {
++      const ctxSafeCall = getCtxSafeCallTool(workspaceDir);
++
++      const result = await ctxSafeCall.execute("ctx-process", {
++        tool: "process",
++        params: { action: "list" },
++        fields: ["sessions"],
++      });
++
++      const details = result.details as {
++        tool: string;
++        fields: string[];
++        output: string;
++      };
++      expect(details.tool).toBe("process");
++      expect(details.fields).toEqual(["sessions"]);
++      expect(details.output).toContain("sessions");
++    });
++  });
++});
+diff --git a/src/agents/pi-tools.ts b/src/agents/pi-tools.ts
+index c5741ef6c..1f4ff8d85 100644
+--- a/src/agents/pi-tools.ts
++++ b/src/agents/pi-tools.ts
+@@ -313,6 +313,11 @@ export function createOpenClawCodingTools(options?: {
+           cwd: sandboxRoot ?? workspaceRoot,
+           sandboxRoot: sandboxRoot && allowWorkspaceWrites ? sandboxRoot : undefined,
+         });
++  const ctxSafeCallProviderTools = [
++    base.find((tool) => tool.name === "read"),
++    execTool as unknown as AnyAgentTool,
++    processTool as unknown as AnyAgentTool,
++  ].filter((tool): tool is AnyAgentTool => !!tool);
+   const tools: AnyAgentTool[] = [
+     ...base,
+     ...(sandboxRoot
+@@ -361,6 +366,7 @@ export function createOpenClawCodingTools(options?: {
+       requireExplicitMessageTarget: options?.requireExplicitMessageTarget,
+       disableMessageTool: options?.disableMessageTool,
+       requesterAgentIdOverride: agentId,
++      ctxSafeCallProviderTools,
+     }),
+   ];
+   // Security: treat unknown/undefined as unauthorized (opt-in, not opt-out)
+-- 
+2.50.1 (Apple Git-155)
+

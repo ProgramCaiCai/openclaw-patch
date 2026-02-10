@@ -1,0 +1,25 @@
+From b91e24ad109bfec2f60e96eb90d66b3f79c37c28 Mon Sep 17 00:00:00 2001
+From: quotentiroler <max.nussbaumer@maxhealth.tech>
+Date: Mon, 9 Feb 2026 18:05:13 -0800
+Subject: [PATCH 04/44] only check is check-docs when only docs changed
+
+---
+ .github/workflows/ci.yml | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index a29955c81..74057aee8 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -202,6 +202,8 @@ jobs:
+   # Types, lint, and format check.
+   check:
+     name: "check"
++    needs: [docs-scope]
++    if: needs.docs-scope.outputs.docs_only != 'true'
+     runs-on: blacksmith-4vcpu-ubuntu-2404
+     steps:
+       - name: Checkout
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,346 @@
+From b5510272d6f8efbc04e382c83671573a754c2152 Mon Sep 17 00:00:00 2001
+From: quotentiroler <max.nussbaumer@maxhealth.tech>
+Date: Mon, 9 Feb 2026 20:34:56 -0800
+Subject: [PATCH 18/44] refactor: consolidate fetchWithTimeout into shared
+ utility
+
+---
+ src/discord/probe.ts                        | 37 ++++++++-------------
+ src/infra/update-check.ts                   | 14 ++------
+ src/media-understanding/providers/shared.ts | 16 +--------
+ src/signal/client.ts                        | 19 ++++++-----
+ src/telegram/audit.ts                       | 17 ++--------
+ src/telegram/probe.ts                       | 19 ++---------
+ src/utils/fetch-timeout.ts                  | 24 +++++++++++++
+ 7 files changed, 56 insertions(+), 90 deletions(-)
+ create mode 100644 src/utils/fetch-timeout.ts
+
+diff --git a/src/discord/probe.ts b/src/discord/probe.ts
+index f50bccc0f..45bf3fda7 100644
+--- a/src/discord/probe.ts
++++ b/src/discord/probe.ts
+@@ -1,4 +1,5 @@
+ import { resolveFetch } from "../infra/fetch.js";
++import { fetchWithTimeout } from "../utils/fetch-timeout.js";
+ import { normalizeDiscordToken } from "./token.js";
+ 
+ const DISCORD_API_BASE = "https://discord.com/api/v10";
+@@ -70,11 +71,9 @@ export async function fetchDiscordApplicationSummary(
+   try {
+     const res = await fetchWithTimeout(
+       `${DISCORD_API_BASE}/oauth2/applications/@me`,
++      { headers: { Authorization: `Bot ${normalized}` } },
+       timeoutMs,
+-      fetcher,
+-      {
+-        Authorization: `Bot ${normalized}`,
+-      },
++      getResolvedFetch(fetcher),
+     );
+     if (!res.ok) {
+       return undefined;
+@@ -93,23 +92,12 @@ export async function fetchDiscordApplicationSummary(
+   }
+ }
+ 
+-async function fetchWithTimeout(
+-  url: string,
+-  timeoutMs: number,
+-  fetcher: typeof fetch,
+-  headers?: HeadersInit,
+-): Promise<Response> {
++function getResolvedFetch(fetcher: typeof fetch): typeof fetch {
+   const fetchImpl = resolveFetch(fetcher);
+   if (!fetchImpl) {
+     throw new Error("fetch is not available");
+   }
+-  const controller = new AbortController();
+-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+-  try {
+-    return await fetchImpl(url, { signal: controller.signal, headers });
+-  } finally {
+-    clearTimeout(timer);
+-  }
++  return fetchImpl;
+ }
+ 
+ export async function probeDiscord(
+@@ -135,9 +123,12 @@ export async function probeDiscord(
+     };
+   }
+   try {
+-    const res = await fetchWithTimeout(`${DISCORD_API_BASE}/users/@me`, timeoutMs, fetcher, {
+-      Authorization: `Bot ${normalized}`,
+-    });
++    const res = await fetchWithTimeout(
++      `${DISCORD_API_BASE}/users/@me`,
++      { headers: { Authorization: `Bot ${normalized}` } },
++      timeoutMs,
++      getResolvedFetch(fetcher),
++    );
+     if (!res.ok) {
+       result.status = res.status;
+       result.error = `getMe failed (${res.status})`;
+@@ -176,11 +167,9 @@ export async function fetchDiscordApplicationId(
+   try {
+     const res = await fetchWithTimeout(
+       `${DISCORD_API_BASE}/oauth2/applications/@me`,
++      { headers: { Authorization: `Bot ${normalized}` } },
+       timeoutMs,
+-      fetcher,
+-      {
+-        Authorization: `Bot ${normalized}`,
+-      },
++      getResolvedFetch(fetcher),
+     );
+     if (!res.ok) {
+       return undefined;
+diff --git a/src/infra/update-check.ts b/src/infra/update-check.ts
+index c4be8d5da..8525f53bf 100644
+--- a/src/infra/update-check.ts
++++ b/src/infra/update-check.ts
+@@ -1,6 +1,7 @@
+ import fs from "node:fs/promises";
+ import path from "node:path";
+ import { runCommandWithTimeout } from "../process/exec.js";
++import { fetchWithTimeout } from "../utils/fetch-timeout.js";
+ import { parseSemver } from "./runtime-guard.js";
+ import { channelToNpmTag, type UpdateChannel } from "./update-channels.js";
+ 
+@@ -288,16 +289,6 @@ export async function checkDepsStatus(params: {
+   };
+ }
+ 
+-async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
+-  const ctrl = new AbortController();
+-  const t = setTimeout(() => ctrl.abort(), Math.max(250, timeoutMs));
+-  try {
+-    return await fetch(url, { signal: ctrl.signal });
+-  } finally {
+-    clearTimeout(t);
+-  }
+-}
+-
+ export async function fetchNpmLatestVersion(params?: {
+   timeoutMs?: number;
+ }): Promise<RegistryStatus> {
+@@ -317,7 +308,8 @@ export async function fetchNpmTagVersion(params: {
+   try {
+     const res = await fetchWithTimeout(
+       `https://registry.npmjs.org/openclaw/${encodeURIComponent(tag)}`,
+-      timeoutMs,
++      {},
++      Math.max(250, timeoutMs),
+     );
+     if (!res.ok) {
+       return { tag, version: null, error: `HTTP ${res.status}` };
+diff --git a/src/media-understanding/providers/shared.ts b/src/media-understanding/providers/shared.ts
+index 66d0f6b7d..3e9a9ee7d 100644
+--- a/src/media-understanding/providers/shared.ts
++++ b/src/media-understanding/providers/shared.ts
+@@ -1,6 +1,7 @@
+ import type { GuardedFetchResult } from "../../infra/net/fetch-guard.js";
+ import type { LookupFn, SsrFPolicy } from "../../infra/net/ssrf.js";
+ import { fetchWithSsrFGuard } from "../../infra/net/fetch-guard.js";
++export { fetchWithTimeout } from "../../utils/fetch-timeout.js";
+ 
+ const MAX_ERROR_CHARS = 300;
+ 
+@@ -9,21 +10,6 @@ export function normalizeBaseUrl(baseUrl: string | undefined, fallback: string):
+   return raw.replace(/\/+$/, "");
+ }
+ 
+-export async function fetchWithTimeout(
+-  url: string,
+-  init: RequestInit,
+-  timeoutMs: number,
+-  fetchFn: typeof fetch,
+-): Promise<Response> {
+-  const controller = new AbortController();
+-  const timer = setTimeout(() => controller.abort(), Math.max(1, timeoutMs));
+-  try {
+-    return await fetchFn(url, { ...init, signal: controller.signal });
+-  } finally {
+-    clearTimeout(timer);
+-  }
+-}
+-
+ export async function fetchWithTimeoutGuarded(
+   url: string,
+   init: RequestInit,
+diff --git a/src/signal/client.ts b/src/signal/client.ts
+index 1551183f1..35bb54c24 100644
+--- a/src/signal/client.ts
++++ b/src/signal/client.ts
+@@ -1,5 +1,6 @@
+ import { randomUUID } from "node:crypto";
+ import { resolveFetch } from "../infra/fetch.js";
++import { fetchWithTimeout } from "../utils/fetch-timeout.js";
+ 
+ export type SignalRpcOptions = {
+   baseUrl: string;
+@@ -38,18 +39,12 @@ function normalizeBaseUrl(url: string): string {
+   return `http://${trimmed}`.replace(/\/+$/, "");
+ }
+ 
+-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number) {
++function getRequiredFetch(): typeof fetch {
+   const fetchImpl = resolveFetch();
+   if (!fetchImpl) {
+     throw new Error("fetch is not available");
+   }
+-  const controller = new AbortController();
+-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+-  try {
+-    return await fetchImpl(url, { ...init, signal: controller.signal });
+-  } finally {
+-    clearTimeout(timer);
+-  }
++  return fetchImpl;
+ }
+ 
+ export async function signalRpcRequest<T = unknown>(
+@@ -73,6 +68,7 @@ export async function signalRpcRequest<T = unknown>(
+       body,
+     },
+     opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
++    getRequiredFetch(),
+   );
+   if (res.status === 201) {
+     return undefined as T;
+@@ -96,7 +92,12 @@ export async function signalCheck(
+ ): Promise<{ ok: boolean; status?: number | null; error?: string | null }> {
+   const normalized = normalizeBaseUrl(baseUrl);
+   try {
+-    const res = await fetchWithTimeout(`${normalized}/api/v1/check`, { method: "GET" }, timeoutMs);
++    const res = await fetchWithTimeout(
++      `${normalized}/api/v1/check`,
++      { method: "GET" },
++      timeoutMs,
++      getRequiredFetch(),
++    );
+     if (!res.ok) {
+       return { ok: false, status: res.status, error: `HTTP ${res.status}` };
+     }
+diff --git a/src/telegram/audit.ts b/src/telegram/audit.ts
+index 7910ff180..48e4a923f 100644
+--- a/src/telegram/audit.ts
++++ b/src/telegram/audit.ts
+@@ -1,5 +1,6 @@
+ import type { TelegramGroupConfig } from "../config/types.js";
+ import { isRecord } from "../utils.js";
++import { fetchWithTimeout } from "../utils/fetch-timeout.js";
+ import { makeProxyFetch } from "./proxy.js";
+ 
+ const TELEGRAM_API_BASE = "https://api.telegram.org";
+@@ -25,20 +26,6 @@ export type TelegramGroupMembershipAudit = {
+ type TelegramApiOk<T> = { ok: true; result: T };
+ type TelegramApiErr = { ok: false; description?: string };
+ 
+-async function fetchWithTimeout(
+-  url: string,
+-  timeoutMs: number,
+-  fetcher: typeof fetch,
+-): Promise<Response> {
+-  const controller = new AbortController();
+-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+-  try {
+-    return await fetcher(url, { signal: controller.signal });
+-  } finally {
+-    clearTimeout(timer);
+-  }
+-}
+-
+ export function collectTelegramUnmentionedGroupIds(
+   groups: Record<string, TelegramGroupConfig> | undefined,
+ ) {
+@@ -107,7 +94,7 @@ export async function auditTelegramGroupMembership(params: {
+   for (const chatId of params.groupIds) {
+     try {
+       const url = `${base}/getChatMember?chat_id=${encodeURIComponent(chatId)}&user_id=${encodeURIComponent(String(params.botId))}`;
+-      const res = await fetchWithTimeout(url, params.timeoutMs, fetcher);
++      const res = await fetchWithTimeout(url, {}, params.timeoutMs, fetcher);
+       const json = (await res.json()) as TelegramApiOk<{ status?: string }> | TelegramApiErr;
+       if (!res.ok || !isRecord(json) || !json.ok) {
+         const desc =
+diff --git a/src/telegram/probe.ts b/src/telegram/probe.ts
+index 6ac8eeae8..272a110dc 100644
+--- a/src/telegram/probe.ts
++++ b/src/telegram/probe.ts
+@@ -1,3 +1,4 @@
++import { fetchWithTimeout } from "../utils/fetch-timeout.js";
+ import { makeProxyFetch } from "./proxy.js";
+ 
+ const TELEGRAM_API_BASE = "https://api.telegram.org";
+@@ -17,20 +18,6 @@ export type TelegramProbe = {
+   webhook?: { url?: string | null; hasCustomCert?: boolean | null };
+ };
+ 
+-async function fetchWithTimeout(
+-  url: string,
+-  timeoutMs: number,
+-  fetcher: typeof fetch,
+-): Promise<Response> {
+-  const controller = new AbortController();
+-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+-  try {
+-    return await fetcher(url, { signal: controller.signal });
+-  } finally {
+-    clearTimeout(timer);
+-  }
+-}
+-
+ export async function probeTelegram(
+   token: string,
+   timeoutMs: number,
+@@ -48,7 +35,7 @@ export async function probeTelegram(
+   };
+ 
+   try {
+-    const meRes = await fetchWithTimeout(`${base}/getMe`, timeoutMs, fetcher);
++    const meRes = await fetchWithTimeout(`${base}/getMe`, {}, timeoutMs, fetcher);
+     const meJson = (await meRes.json()) as {
+       ok?: boolean;
+       description?: string;
+@@ -83,7 +70,7 @@ export async function probeTelegram(
+ 
+     // Try to fetch webhook info, but don't fail health if it errors.
+     try {
+-      const webhookRes = await fetchWithTimeout(`${base}/getWebhookInfo`, timeoutMs, fetcher);
++      const webhookRes = await fetchWithTimeout(`${base}/getWebhookInfo`, {}, timeoutMs, fetcher);
+       const webhookJson = (await webhookRes.json()) as {
+         ok?: boolean;
+         result?: { url?: string; has_custom_certificate?: boolean };
+diff --git a/src/utils/fetch-timeout.ts b/src/utils/fetch-timeout.ts
+new file mode 100644
+index 000000000..13f3e0669
+--- /dev/null
++++ b/src/utils/fetch-timeout.ts
+@@ -0,0 +1,24 @@
++/**
++ * Fetch wrapper that adds timeout support via AbortController.
++ *
++ * @param url - The URL to fetch
++ * @param init - RequestInit options (headers, method, body, etc.)
++ * @param timeoutMs - Timeout in milliseconds
++ * @param fetchFn - The fetch implementation to use (defaults to global fetch)
++ * @returns The fetch Response
++ * @throws AbortError if the request times out
++ */
++export async function fetchWithTimeout(
++  url: string,
++  init: RequestInit,
++  timeoutMs: number,
++  fetchFn: typeof fetch = fetch,
++): Promise<Response> {
++  const controller = new AbortController();
++  const timer = setTimeout(() => controller.abort(), Math.max(1, timeoutMs));
++  try {
++    return await fetchFn(url, { ...init, signal: controller.signal });
++  } finally {
++    clearTimeout(timer);
++  }
++}
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,7 +1,7 @@
-From 9513e9c013850b9c7132c65b5000152b4b54efae Mon Sep 17 00:00:00 2001
+From f69afa26808843c4113fc07831b397fab1b5376c Mon Sep 17 00:00:00 2001
 From: programcaicai <programcaicai@programcaicaideMac-mini.local>
 Date: Tue, 10 Feb 2026 13:27:17 +0800
-Subject: [PATCH 08/12] feat(tools): add safe_call wrapper for bounded tool
+Subject: [PATCH 33/44] feat(tools): add safe_call wrapper for bounded tool
  output
 
 ---

@@ -1,0 +1,278 @@
+From 0329eee02c841e0aec594e71ddf1847e0930b8c4 Mon Sep 17 00:00:00 2001
+From: programcaicai <programcaicai@programcaicaideMac-mini.local>
+Date: Tue, 10 Feb 2026 14:05:10 +0800
+Subject: [PATCH 34/44] docs(openclaw-patch): add safe_call reports and README
+ notes
+
+---
+ README.md                                |  7 ++
+ reports/openclaw-patch/implementation.md | 89 ++++++++++++++++++++++++
+ reports/openclaw-patch/publish-log.md    | 60 ++++++++++++++++
+ reports/openclaw-patch/research.md       | 74 ++++++++++++++++++++
+ 4 files changed, 230 insertions(+)
+ create mode 100644 reports/openclaw-patch/implementation.md
+ create mode 100644 reports/openclaw-patch/publish-log.md
+ create mode 100644 reports/openclaw-patch/research.md
+
+diff --git a/README.md b/README.md
+index b1a3b407a..14019c835 100644
+--- a/README.md
++++ b/README.md
+@@ -25,6 +25,13 @@ If you want a personal, single-user assistant that feels local, fast, and always
+ 
+ [Website](https://openclaw.ai) · [Docs](https://docs.openclaw.ai) · [DeepWiki](https://deepwiki.com/openclaw/openclaw) · [Getting Started](https://docs.openclaw.ai/start/getting-started) · [Updating](https://docs.openclaw.ai/install/updating) · [Showcase](https://docs.openclaw.ai/start/showcase) · [FAQ](https://docs.openclaw.ai/start/faq) · [Wizard](https://docs.openclaw.ai/start/wizard) · [Nix](https://github.com/openclaw/nix-openclaw) · [Docker](https://docs.openclaw.ai/install/docker) · [Discord](https://discord.gg/clawd)
+ 
++## Patch Notes (programcaicai/openclaw-patch)
++
++- Added built-in tool `safe_call` to safely wrap other tool invocations.
++- `safe_call` supports field filtering (`fields`), pagination (`offset`/`limit`), and bounded output (`maxChars`) with head+tail truncation.
++- Returned metadata includes `totalItems`, `hasMore`, and `nextOffset` for reliable follow-up paging.
++- Registration is in `src/agents/openclaw-tools.ts`, implementation in `src/agents/tools/safe-call-tool.ts`.
++
+ Preferred setup: run the onboarding wizard (`openclaw onboard`) in your terminal.
+ The wizard guides you step by step through setting up the gateway, workspace, channels, and skills. The CLI wizard is the recommended path and works on **macOS, Linux, and Windows (via WSL2; strongly recommended)**.
+ Works with npm, pnpm, or bun.
+diff --git a/reports/openclaw-patch/implementation.md b/reports/openclaw-patch/implementation.md
+new file mode 100644
+index 000000000..8da32e5f7
+--- /dev/null
++++ b/reports/openclaw-patch/implementation.md
+@@ -0,0 +1,89 @@
++# safe_call implementation log
++
++## Branch and baseline
++
++- Working branch: `fix/compact-content-normalize`
++- Main divergence check: branch is ahead `main` and not behind (`0	8`), so no rebase was required.
++
++## Implemented built-in tool
++
++### 1) New built-in: `safe_call`
++
++- File: `src/agents/tools/safe-call-tool.ts`
++- Factory: `createSafeCallTool(options)`
++- Tool name: `safe_call`
++- Parameters schema:
++  - `tool: string`
++  - `params?: object`
++  - `maxChars?: number`
++  - `offset?: number`
++  - `limit?: number`
++  - `fields?: string[]`
++
++Code references:
++
++- Schema: `src/agents/tools/safe-call-tool.ts:14`
++- Factory and execute: `src/agents/tools/safe-call-tool.ts:198`
++
++### 2) Core logic implemented
++
++- Resolve target tool by name, reject unknown tool and self-wrap.
++- Execute wrapped tool with `params`.
++- Extract payload (prefer `.details`, fallback to text blocks in `.content`).
++- Apply field filtering (supports nested dotted paths like `a.b.c`).
++- Paginate:
++  - arrays by element count
++  - non-array payload serialized and paginated by lines
++- Truncate by `maxChars` using head+tail strategy with explicit offset hint.
++- Return normalized metadata:
++  - `totalItems`
++  - `hasMore`
++  - `nextOffset`
++  - plus `mode`, `offset`, `limit`, `maxChars`, `fields`, `truncated`, `output`
++
++Code references:
++
++- Field filtering: `src/agents/tools/safe-call-tool.ts:89`
++- Pagination: `src/agents/tools/safe-call-tool.ts:108`, `src/agents/tools/safe-call-tool.ts:122`
++- Truncation: `src/agents/tools/safe-call-tool.ts:148`
++- Metadata return: `src/agents/tools/safe-call-tool.ts:245`
++
++### 3) Registration into built-ins
++
++- Added import and registration in central tool registry.
++- Registered after plugin tools so it can wrap both core + plugin tools.
++- Added plugin conflict guard by reserving `safe_call` in `existingToolNames`.
++
++Code references:
++
++- Import: `src/agents/openclaw-tools.ts:14`
++- Plugin conflict guard: `src/agents/openclaw-tools.ts:176`
++- Wrapper registration: `src/agents/openclaw-tools.ts:181`
++
++### 4) Tests
++
++- Added dedicated tests for:
++  - fields + array pagination
++  - line pagination for object payloads
++  - head+tail truncation with offset hint
++  - unknown tool + self-wrap rejection
++- Added schema assertions for `safe_call` numeric fields in sessions tool schema compatibility test.
++
++Code references:
++
++- Tool tests: `src/agents/tools/safe-call-tool.test.ts:18`
++- Schema assertions: `src/agents/openclaw-tools.sessions.test.ts:76`
++
++Executed verification:
++
++- `pnpm vitest run src/agents/tools/safe-call-tool.test.ts src/agents/openclaw-tools.sessions.test.ts --reporter=dot`
++- Result: `2 passed`, `14 passed` tests total.
++
++## Commit record
++
++- Implementation commit already present on branch:
++  - `4e70e4abb feat(tools): add safe_call wrapper for bounded tool output`
++- Conventional Commits compliance:
++  - type: `feat`
++  - scope: `tools`
++  - imperative lowercase description
+diff --git a/reports/openclaw-patch/publish-log.md b/reports/openclaw-patch/publish-log.md
+new file mode 100644
+index 000000000..eda5484a0
+--- /dev/null
++++ b/reports/openclaw-patch/publish-log.md
+@@ -0,0 +1,60 @@
++# openclaw patch publish log
++
++## Target
++
++- GitHub repo: `ProgramCaiCai/openclaw-patch`
++- Required push mapping: `fix/compact-content-normalize:main`
++
++## Remote checks
++
++- Existing remotes in working repo include:
++  - `patch -> git@github.com:ProgramCaiCai/openclaw-patch.git`
++  - `patch_https -> https://github.com/ProgramCaiCai/openclaw-patch.git` (temporary troubleshooting remote)
++- Remote repository exists and is reachable.
++
++## Push attempts from working repo (failed)
++
++From `/Users/programcaicai/clawd/projects/openclaw`, direct pushes repeatedly failed with the same remote unpack error:
++
++- Error:
++  - `remote: fatal: did not receive expected object 1c6b25ddbbeffb51daae43aae85ce01930d9e459`
++  - `error: remote unpack failed: index-pack failed`
++- Commands tried:
++  - `git push patch fix/compact-content-normalize:main`
++  - `git push --force-with-lease patch fix/compact-content-normalize:main`
++  - `git push --force --no-thin patch fix/compact-content-normalize:main`
++  - `git -c push.useThin=false push --force patch fix/compact-content-normalize:main`
++
++Troubleshooting done:
++
++- Verified missing object locally (`git cat-file -t <hash>` initially failed).
++- Fetched object from origin (`git fetch origin 1c6b25dd...`) and verified it exists locally afterward.
++- Despite that, direct pushes from the original repo still failed with the same remote unpack error.
++
++## Successful publish path (clean clone workaround)
++
++To avoid local pack/object negotiation corruption, a clean clone was used:
++
++1. Cloned `openclaw/openclaw` to:
++   - `/Users/programcaicai/clawd/tmp/openclaw-publish-clean`
++2. Fetched local source branch from working repo as `localsrc/fix/compact-content-normalize`.
++3. Recreated branch `fix/compact-content-normalize` via ordered cherry-picks of the 8 commits:
++   - `02288f88e` `621f46689` `19649076b` `ef956011f` `d9bc88c59` `8fce683d0` `8962b5b4a` `4e70e4abb`
++4. Added README patch notes commit:
++   - `a8559525c docs(readme): add safe_call patch notes`
++5. Force-pushed successfully:
++   - `git push --force patch fix/compact-content-normalize:main`
++   - Output: `16faf31d2..a8559525c  fix/compact-content-normalize -> main`
++
++## Final remote state
++
++- `git ls-remote --heads patch main` now resolves to:
++  - `a8559525cf5857c5d22ed96e38696303e03fe44b refs/heads/main`
++- `patch/main` includes:
++  - `feat(tools): add safe_call wrapper for bounded tool output`
++  - `docs(readme): add safe_call patch notes`
++
++## Notes
++
++- Original working branch in `/projects/openclaw` remains unchanged except local report/README edits for this task.
++- Publish succeeded using a clean-clone transport workaround due repeated remote unpack failures from the original local repository.
+diff --git a/reports/openclaw-patch/research.md b/reports/openclaw-patch/research.md
+new file mode 100644
+index 000000000..9df1e4766
+--- /dev/null
++++ b/reports/openclaw-patch/research.md
+@@ -0,0 +1,74 @@
++# openclaw safe_call patch research
++
++## Scope
++
++- Repository: `/Users/programcaicai/clawd/projects/openclaw`
++- Goal: locate built-in tool registration path and compare `cron`/`gateway` registration+execution pattern before adding `safe_call`.
++
++## Built-in tool registration path
++
++1. Tool assembly entry is `createOpenClawTools` in `src/agents/openclaw-tools.ts`.
++2. Core built-ins are instantiated directly in one array (`coreTools`) via factory functions (`createCronTool`, `createGatewayTool`, etc.).
++3. Plugin tools are appended via `resolvePluginTools`, with conflict prevention using `existingToolNames`.
++4. `safe_call` is registered last and wraps the combined tool list (`coreTools + pluginTools`) through a resolver callback.
++
++Key code points:
++
++- Imports include `createSafeCallTool`: `src/agents/openclaw-tools.ts:14`
++- Core registration (cron/gateway): `src/agents/openclaw-tools.ts:99`, `src/agents/openclaw-tools.ts:109`, `src/agents/openclaw-tools.ts:117`
++- Plugin conflict guard includes `safe_call`: `src/agents/openclaw-tools.ts:176`
++- Wrapper tool registration and resolver: `src/agents/openclaw-tools.ts:181`
++
++## Registration pattern analysis: cron/gateway
++
++### Shared pattern
++
++Both built-ins follow a consistent contract:
++
++- Export a `createXxxTool(...)` factory returning `AnyAgentTool`
++- Define a flattened TypeBox schema (provider-compatible; runtime validation for action-specific required fields)
++- Parse `action` + common gateway options
++- Dispatch with `switch`/`if` per action and return `jsonResult(...)`
++- Use `callGatewayTool(...)` helper to invoke gateway RPC
++
++Evidence:
++
++- `cron` schema and factory: `src/agents/tools/cron-tool.ts:29`, `src/agents/tools/cron-tool.ts:223`
++- `gateway` schema and factory: `src/agents/tools/gateway-tool.ts:42`, `src/agents/tools/gateway-tool.ts:64`
++- Shared RPC helper: `src/agents/tools/gateway.ts:28`
++
++### cron-specific traits
++
++- Action multiplexer via explicit `switch (action)` covering `status/list/add/update/remove/run/runs/wake`.
++- Runtime normalization + compatibility repair for flattened model outputs.
++- Gateway calls consistently wrapped by `jsonResult`.
++
++Evidence:
++
++- Action list/schema: `src/agents/tools/cron-tool.ts:18`, `src/agents/tools/cron-tool.ts:29`
++- Action dispatch: `src/agents/tools/cron-tool.ts:290`
++- Gateway calls: `src/agents/tools/cron-tool.ts:292`, `src/agents/tools/cron-tool.ts:415`
++
++### gateway-specific traits
++
++- Flattened action schema to avoid provider JSON Schema incompatibilities (`anyOf`/`oneOf` constraints documented in comments).
++- Runtime conditional checks (`raw`/`baseHash`/`sessionKey`) by action branch.
++- Returns normalized `{ ok: true, result }` for most RPC branches.
++
++Evidence:
++
++- Schema compatibility note: `src/agents/tools/gateway-tool.ts:39`
++- Action dispatch branches: `src/agents/tools/gateway-tool.ts:167`, `src/agents/tools/gateway-tool.ts:175`, `src/agents/tools/gateway-tool.ts:201`, `src/agents/tools/gateway-tool.ts:227`
++
++## Implications for safe_call
++
++To stay consistent with repository style, `safe_call` should:
++
++- Use a flattened tool schema and runtime checks.
++- Return via `jsonResult` with deterministic metadata.
++- Be appended after plugin resolution, so it can wrap both core + plugin tools.
++- Explicitly avoid self-wrapping and unknown-tool ambiguity.
++
++## Conclusion
++
++Built-in tools in this repo are centrally registered in `createOpenClawTools` and follow a uniform factory+schema+runtime-dispatch style. `safe_call` fits this model when added as a final wrapper tool over the merged tool set.
+-- 
+2.50.1 (Apple Git-155)
+

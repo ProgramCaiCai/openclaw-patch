@@ -1,17 +1,17 @@
-From 42c8c288816b24ce649d66a1f29be46d5e14e11d Mon Sep 17 00:00:00 2001
+From 1168b79e6d0d3979e3cd0949fef78be30c550b6b Mon Sep 17 00:00:00 2001
 From: programcaicai <programcaicai@programcaicaideMac-mini.local>
 Date: Wed, 4 Feb 2026 15:26:05 +0800
-Subject: [PATCH 02/12] feat(cli): add plugins uninstall command
+Subject: [PATCH 27/44] feat(cli): add plugins uninstall command
 
 ---
  src/cli/plugins-cli.ts | 109 ++++++++++++++++++++++++++++++++++++++++-
  1 file changed, 108 insertions(+), 1 deletion(-)
 
 diff --git a/src/cli/plugins-cli.ts b/src/cli/plugins-cli.ts
-index a3832d8c9..595872de3 100644
+index 21bc6a5cc..638829908 100644
 --- a/src/cli/plugins-cli.ts
 +++ b/src/cli/plugins-cli.ts
-@@ -14,7 +14,7 @@ import { defaultRuntime } from "../runtime.js";
+@@ -15,7 +15,7 @@ import { defaultRuntime } from "../runtime.js";
  import { formatDocsLink } from "../terminal/links.js";
  import { renderTable } from "../terminal/table.js";
  import { theme } from "../terminal/theme.js";
@@ -20,7 +20,7 @@ index a3832d8c9..595872de3 100644
  
  export type PluginsListOptions = {
    json?: boolean;
-@@ -307,6 +307,113 @@ export function registerPluginsCli(program: Command) {
+@@ -332,6 +332,113 @@ export function registerPluginsCli(program: Command) {
        defaultRuntime.log(`Disabled plugin "${id}". Restart the gateway to apply.`);
      });
  

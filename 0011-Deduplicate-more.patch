@@ -1,0 +1,434 @@
+From d563f7d68e5ac3f5eab086cfdbb28be079b84e15 Mon Sep 17 00:00:00 2001
+From: quotentiroler <max.nussbaumer@maxhealth.tech>
+Date: Mon, 9 Feb 2026 18:56:58 -0800
+Subject: [PATCH 11/44] Deduplicate more
+
+---
+ src/agents/model-fallback.ts                | 10 ++++----
+ src/agents/pi-embedded-runner/abort.ts      | 13 +----------
+ src/agents/workspace-templates.ts           | 11 +--------
+ src/browser/extension-relay.ts              | 21 +----------------
+ src/channels/plugins/onboarding/whatsapp.ts | 11 +--------
+ src/cli/completion-cli.ts                   | 10 +-------
+ src/cli/update-cli.ts                       | 10 +-------
+ src/gateway/auth.ts                         | 26 +++++----------------
+ src/infra/unhandled-rejections.ts           | 10 ++++----
+ src/infra/update-global.ts                  | 10 +-------
+ src/infra/update-runner.test.ts             | 10 +-------
+ src/media-understanding/attachments.ts      | 11 +--------
+ src/utils.ts                                | 12 ++++++++++
+ src/wizard/onboarding.completion.ts         | 11 +--------
+ 14 files changed, 38 insertions(+), 138 deletions(-)
+
+diff --git a/src/agents/model-fallback.ts b/src/agents/model-fallback.ts
+index 402584daf..38150d72c 100644
+--- a/src/agents/model-fallback.ts
++++ b/src/agents/model-fallback.ts
+@@ -34,7 +34,11 @@ type FallbackAttempt = {
+   code?: string;
+ };
+ 
+-function isAbortError(err: unknown): boolean {
++/**
++ * Strict abort check for model fallback. Only treats explicit AbortError names as user aborts.
++ * Message-based checks (e.g., "aborted") can mask timeouts and skip fallback.
++ */
++function isStrictAbortError(err: unknown): boolean {
+   if (!err || typeof err !== "object") {
+     return false;
+   }
+@@ -42,13 +46,11 @@ function isAbortError(err: unknown): boolean {
+     return false;
+   }
+   const name = "name" in err ? String(err.name) : "";
+-  // Only treat explicit AbortError names as user aborts.
+-  // Message-based checks (e.g., "aborted") can mask timeouts and skip fallback.
+   return name === "AbortError";
+ }
+ 
+ function shouldRethrowAbort(err: unknown): boolean {
+-  return isAbortError(err) && !isTimeoutError(err);
++  return isStrictAbortError(err) && !isTimeoutError(err);
+ }
+ 
+ function resolveImageFallbackCandidates(params: {
+diff --git a/src/agents/pi-embedded-runner/abort.ts b/src/agents/pi-embedded-runner/abort.ts
+index 43d27fc03..164bf1aff 100644
+--- a/src/agents/pi-embedded-runner/abort.ts
++++ b/src/agents/pi-embedded-runner/abort.ts
+@@ -1,12 +1 @@
+-export function isAbortError(err: unknown): boolean {
+-  if (!err || typeof err !== "object") {
+-    return false;
+-  }
+-  const name = "name" in err ? String(err.name) : "";
+-  if (name === "AbortError") {
+-    return true;
+-  }
+-  const message =
+-    "message" in err && typeof err.message === "string" ? err.message.toLowerCase() : "";
+-  return message.includes("aborted");
+-}
++export { isAbortError } from "../../infra/unhandled-rejections.js";
+diff --git a/src/agents/workspace-templates.ts b/src/agents/workspace-templates.ts
+index ba5c01253..11d733fa9 100644
+--- a/src/agents/workspace-templates.ts
++++ b/src/agents/workspace-templates.ts
+@@ -1,7 +1,7 @@
+-import fs from "node:fs/promises";
+ import path from "node:path";
+ import { fileURLToPath } from "node:url";
+ import { resolveOpenClawPackageRoot } from "../infra/openclaw-root.js";
++import { pathExists } from "../utils.js";
+ 
+ const FALLBACK_TEMPLATE_DIR = path.resolve(
+   path.dirname(fileURLToPath(import.meta.url)),
+@@ -11,15 +11,6 @@ const FALLBACK_TEMPLATE_DIR = path.resolve(
+ let cachedTemplateDir: string | undefined;
+ let resolvingTemplateDir: Promise<string> | undefined;
+ 
+-async function pathExists(candidate: string): Promise<boolean> {
+-  try {
+-    await fs.access(candidate);
+-    return true;
+-  } catch {
+-    return false;
+-  }
+-}
+-
+ export async function resolveWorkspaceTemplateDir(opts?: {
+   cwd?: string;
+   argv1?: string;
+diff --git a/src/browser/extension-relay.ts b/src/browser/extension-relay.ts
+index 6f6f32e2a..41a7d0ff2 100644
+--- a/src/browser/extension-relay.ts
++++ b/src/browser/extension-relay.ts
+@@ -4,7 +4,7 @@ import type { Duplex } from "node:stream";
+ import { randomBytes } from "node:crypto";
+ import { createServer } from "node:http";
+ import WebSocket, { WebSocketServer } from "ws";
+-import { isLoopbackHost } from "../gateway/net.js";
++import { isLoopbackAddress, isLoopbackHost } from "../gateway/net.js";
+ import { rawDataToString } from "../infra/ws.js";
+ 
+ type CdpCommand = {
+@@ -102,25 +102,6 @@ export type ChromeExtensionRelayServer = {
+   stop: () => Promise<void>;
+ };
+ 
+-function isLoopbackAddress(ip: string | undefined): boolean {
+-  if (!ip) {
+-    return false;
+-  }
+-  if (ip === "127.0.0.1") {
+-    return true;
+-  }
+-  if (ip.startsWith("127.")) {
+-    return true;
+-  }
+-  if (ip === "::1") {
+-    return true;
+-  }
+-  if (ip.startsWith("::ffff:127.")) {
+-    return true;
+-  }
+-  return false;
+-}
+-
+ function parseBaseUrl(raw: string): {
+   host: string;
+   port: number;
+diff --git a/src/channels/plugins/onboarding/whatsapp.ts b/src/channels/plugins/onboarding/whatsapp.ts
+index 761f2f8cb..544f97b93 100644
+--- a/src/channels/plugins/onboarding/whatsapp.ts
++++ b/src/channels/plugins/onboarding/whatsapp.ts
+@@ -10,7 +10,7 @@ import { formatCliCommand } from "../../../cli/command-format.js";
+ import { mergeWhatsAppConfig } from "../../../config/merge-config.js";
+ import { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "../../../routing/session-key.js";
+ import { formatDocsLink } from "../../../terminal/links.js";
+-import { normalizeE164 } from "../../../utils.js";
++import { normalizeE164, pathExists } from "../../../utils.js";
+ import {
+   listWhatsAppAccountIds,
+   resolveDefaultWhatsAppAccountId,
+@@ -32,15 +32,6 @@ function setWhatsAppSelfChatMode(cfg: OpenClawConfig, selfChatMode: boolean): Op
+   return mergeWhatsAppConfig(cfg, { selfChatMode });
+ }
+ 
+-async function pathExists(filePath: string): Promise<boolean> {
+-  try {
+-    await fs.access(filePath);
+-    return true;
+-  } catch {
+-    return false;
+-  }
+-}
+-
+ async function detectWhatsAppLinked(cfg: OpenClawConfig, accountId: string): Promise<boolean> {
+   const { authDir } = resolveWhatsAppAuthDir({ cfg, accountId });
+   const credsPath = path.join(authDir, "creds.json");
+diff --git a/src/cli/completion-cli.ts b/src/cli/completion-cli.ts
+index 2d376be17..1a65595a7 100644
+--- a/src/cli/completion-cli.ts
++++ b/src/cli/completion-cli.ts
+@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
+ import os from "node:os";
+ import path from "node:path";
+ import { resolveStateDir } from "../config/paths.js";
++import { pathExists } from "../utils.js";
+ import { getSubCliEntries, registerSubCliByName } from "./program/register.subclis.js";
+ 
+ const COMPLETION_SHELLS = ["zsh", "bash", "powershell", "fish"] as const;
+@@ -86,15 +87,6 @@ async function writeCompletionCache(params: {
+   }
+ }
+ 
+-async function pathExists(targetPath: string): Promise<boolean> {
+-  try {
+-    await fs.access(targetPath);
+-    return true;
+-  } catch {
+-    return false;
+-  }
+-}
+-
+ function formatCompletionSourceLine(
+   shell: CompletionShell,
+   binName: string,
+diff --git a/src/cli/update-cli.ts b/src/cli/update-cli.ts
+index e52258fbd..c6f3dbd62 100644
+--- a/src/cli/update-cli.ts
++++ b/src/cli/update-cli.ts
+@@ -56,6 +56,7 @@ import { formatDocsLink } from "../terminal/links.js";
+ import { stylePromptHint, stylePromptMessage } from "../terminal/prompt-style.js";
+ import { renderTable } from "../terminal/table.js";
+ import { theme } from "../terminal/theme.js";
++import { pathExists } from "../utils.js";
+ import { replaceCliName, resolveCliName } from "./cli-name.js";
+ import { formatCliCommand } from "./command-format.js";
+ import { installCompletion } from "./completion-cli.js";
+@@ -203,15 +204,6 @@ async function isCorePackage(root: string): Promise<boolean> {
+   return Boolean(name && CORE_PACKAGE_NAMES.has(name));
+ }
+ 
+-async function pathExists(targetPath: string): Promise<boolean> {
+-  try {
+-    await fs.stat(targetPath);
+-    return true;
+-  } catch {
+-    return false;
+-  }
+-}
+-
+ async function tryWriteCompletionCache(root: string, jsonMode: boolean): Promise<void> {
+   const binPath = path.join(root, "openclaw.mjs");
+   if (!(await pathExists(binPath))) {
+diff --git a/src/gateway/auth.ts b/src/gateway/auth.ts
+index 294b2c94b..9c7fb9acb 100644
+--- a/src/gateway/auth.ts
++++ b/src/gateway/auth.ts
+@@ -2,7 +2,12 @@ import type { IncomingMessage } from "node:http";
+ import { timingSafeEqual } from "node:crypto";
+ import type { GatewayAuthConfig, GatewayTailscaleMode } from "../config/config.js";
+ import { readTailscaleWhoisIdentity, type TailscaleWhoisIdentity } from "../infra/tailscale.js";
+-import { isTrustedProxyAddress, parseForwardedForClientIp, resolveGatewayClientIp } from "./net.js";
++import {
++  isLoopbackAddress,
++  isTrustedProxyAddress,
++  parseForwardedForClientIp,
++  resolveGatewayClientIp,
++} from "./net.js";
+ export type ResolvedGatewayAuthMode = "token" | "password";
+ 
+ export type ResolvedGatewayAuth = {
+@@ -43,25 +48,6 @@ function normalizeLogin(login: string): string {
+   return login.trim().toLowerCase();
+ }
+ 
+-function isLoopbackAddress(ip: string | undefined): boolean {
+-  if (!ip) {
+-    return false;
+-  }
+-  if (ip === "127.0.0.1") {
+-    return true;
+-  }
+-  if (ip.startsWith("127.")) {
+-    return true;
+-  }
+-  if (ip === "::1") {
+-    return true;
+-  }
+-  if (ip.startsWith("::ffff:127.")) {
+-    return true;
+-  }
+-  return false;
+-}
+-
+ function getHostName(hostHeader?: string): string {
+   const host = (hostHeader ?? "").trim().toLowerCase();
+   if (!host) {
+diff --git a/src/infra/unhandled-rejections.ts b/src/infra/unhandled-rejections.ts
+index c2e8d935c..d84c4bf7e 100644
+--- a/src/infra/unhandled-rejections.ts
++++ b/src/infra/unhandled-rejections.ts
+@@ -62,12 +62,10 @@ export function isAbortError(err: unknown): boolean {
+   if (name === "AbortError") {
+     return true;
+   }
+-  // Check for "This operation was aborted" message from Node's undici
+-  const message = "message" in err && typeof err.message === "string" ? err.message : "";
+-  if (message === "This operation was aborted") {
+-    return true;
+-  }
+-  return false;
++  // Check for abort messages from Node's undici and other sources
++  const message =
++    "message" in err && typeof err.message === "string" ? err.message.toLowerCase() : "";
++  return message.includes("aborted");
+ }
+ 
+ function isFatalError(err: unknown): boolean {
+diff --git a/src/infra/update-global.ts b/src/infra/update-global.ts
+index d7934be57..e22dd3b1d 100644
+--- a/src/infra/update-global.ts
++++ b/src/infra/update-global.ts
+@@ -1,6 +1,7 @@
+ import fs from "node:fs/promises";
+ import os from "node:os";
+ import path from "node:path";
++import { pathExists } from "../utils.js";
+ 
+ export type GlobalInstallManager = "npm" | "pnpm" | "bun";
+ 
+@@ -13,15 +14,6 @@ const PRIMARY_PACKAGE_NAME = "openclaw";
+ const ALL_PACKAGE_NAMES = [PRIMARY_PACKAGE_NAME] as const;
+ const GLOBAL_RENAME_PREFIX = ".";
+ 
+-async function pathExists(targetPath: string): Promise<boolean> {
+-  try {
+-    await fs.access(targetPath);
+-    return true;
+-  } catch {
+-    return false;
+-  }
+-}
+-
+ async function tryRealpath(targetPath: string): Promise<string> {
+   try {
+     return await fs.realpath(targetPath);
+diff --git a/src/infra/update-runner.test.ts b/src/infra/update-runner.test.ts
+index a6c6e28d4..f4ac1d701 100644
+--- a/src/infra/update-runner.test.ts
++++ b/src/infra/update-runner.test.ts
+@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
+ import os from "node:os";
+ import path from "node:path";
+ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import { pathExists } from "../utils.js";
+ import { runGatewayUpdate } from "./update-runner.js";
+ 
+ type CommandResult = { stdout?: string; stderr?: string; code?: number };
+@@ -21,15 +22,6 @@ function createRunner(responses: Record<string, CommandResult>) {
+   return { runner, calls };
+ }
+ 
+-async function pathExists(targetPath: string): Promise<boolean> {
+-  try {
+-    await fs.stat(targetPath);
+-    return true;
+-  } catch {
+-    return false;
+-  }
+-}
+-
+ describe("runGatewayUpdate", () => {
+   let tempDir: string;
+ 
+diff --git a/src/media-understanding/attachments.ts b/src/media-understanding/attachments.ts
+index 97b3b5ac5..0c2449208 100644
+--- a/src/media-understanding/attachments.ts
++++ b/src/media-understanding/attachments.ts
+@@ -7,6 +7,7 @@ import type { MsgContext } from "../auto-reply/templating.js";
+ import type { MediaUnderstandingAttachmentsConfig } from "../config/types.tools.js";
+ import type { MediaAttachment, MediaUnderstandingCapability } from "./types.js";
+ import { logVerbose, shouldLogVerbose } from "../globals.js";
++import { isAbortError } from "../infra/unhandled-rejections.js";
+ import { fetchRemoteMedia, MediaFetchError } from "../media/fetch.js";
+ import { detectMime, getFileExtension, isAudioFileName, kindFromMime } from "../media/mime.js";
+ import { MediaUnderstandingSkipError } from "./errors.js";
+@@ -141,16 +142,6 @@ export function isImageAttachment(attachment: MediaAttachment): boolean {
+   return resolveAttachmentKind(attachment) === "image";
+ }
+ 
+-function isAbortError(err: unknown): boolean {
+-  if (!err) {
+-    return false;
+-  }
+-  if (err instanceof Error && err.name === "AbortError") {
+-    return true;
+-  }
+-  return false;
+-}
+-
+ function resolveRequestUrl(input: RequestInfo | URL): string {
+   if (typeof input === "string") {
+     return input;
+diff --git a/src/utils.ts b/src/utils.ts
+index 30d547625..66ed063cf 100644
+--- a/src/utils.ts
++++ b/src/utils.ts
+@@ -13,6 +13,18 @@ export async function ensureDir(dir: string) {
+   await fs.promises.mkdir(dir, { recursive: true });
+ }
+ 
++/**
++ * Check if a file or directory exists at the given path.
++ */
++export async function pathExists(targetPath: string): Promise<boolean> {
++  try {
++    await fs.promises.access(targetPath);
++    return true;
++  } catch {
++    return false;
++  }
++}
++
+ export function clampNumber(value: number, min: number, max: number): number {
+   return Math.max(min, Math.min(max, value));
+ }
+diff --git a/src/wizard/onboarding.completion.ts b/src/wizard/onboarding.completion.ts
+index 9bea14369..06ad9ed1a 100644
+--- a/src/wizard/onboarding.completion.ts
++++ b/src/wizard/onboarding.completion.ts
+@@ -1,4 +1,3 @@
+-import fs from "node:fs/promises";
+ import os from "node:os";
+ import path from "node:path";
+ import type { ShellCompletionStatus } from "../commands/doctor-completion.js";
+@@ -10,6 +9,7 @@ import {
+   checkShellCompletionStatus,
+   ensureCompletionCacheExists,
+ } from "../commands/doctor-completion.js";
++import { pathExists } from "../utils.js";
+ 
+ type CompletionDeps = {
+   resolveCliName: () => string;
+@@ -18,15 +18,6 @@ type CompletionDeps = {
+   installCompletion: (shell: string, yes: boolean, binName?: string) => Promise<void>;
+ };
+ 
+-async function pathExists(filePath: string): Promise<boolean> {
+-  try {
+-    await fs.access(filePath);
+-    return true;
+-  } catch {
+-    return false;
+-  }
+-}
+-
+ async function resolveProfileHint(shell: ShellCompletionStatus["shell"]): Promise<string> {
+   const home = process.env.HOME || os.homedir();
+   if (shell === "zsh") {
+-- 
+2.50.1 (Apple Git-155)
+

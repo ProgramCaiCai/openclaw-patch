@@ -1,0 +1,138 @@
+From 1accdfd054737bd9ddd673ac97f0214f80208be8 Mon Sep 17 00:00:00 2001
+From: Evan Reid <evan@reids.us>
+Date: Mon, 9 Feb 2026 22:51:24 -0500
+Subject: [PATCH 15/44] fix(tools): correct Grok response parsing for xAI
+ Responses API (#13049)
+
+* fix(tools): correct Grok response parsing for xAI Responses API
+
+The xAI Responses API returns content in output[0].content[0].text,
+not in output_text field. Updated GrokSearchResponse type and
+runGrokSearch to extract content from the correct path.
+
+Fixes the 'No response' issue when using Grok web search.
+
+* fix(tools): harden Grok web_search parsing (#13049) (thanks @ereid7)
+
+---------
+
+Co-authored-by: erai <erai@erais-Mac-mini.local>
+Co-authored-by: Tak Hoffman <781889+Takhoffman@users.noreply.github.com>
+---
+ CHANGELOG.md                        |  1 +
+ src/agents/tools/web-search.test.ts | 21 +++++++++++++++++++++
+ src/agents/tools/web-search.ts      | 24 +++++++++++++++++++++---
+ 3 files changed, 43 insertions(+), 3 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index ff42e19af..00e64bf00 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -30,6 +30,7 @@ Docs: https://docs.openclaw.ai
+ - Auth: strip embedded line breaks from pasted API keys and tokens before storing/resolving credentials.
+ - Web UI: make chat refresh smoothly scroll to the latest messages and suppress new-messages badge flash during manual refresh.
+ - Tools/web_search: include provider-specific settings in the web search cache key, and pass `inlineCitations` for Grok. (#12419) Thanks @tmchow.
++- Tools/web_search: fix Grok response parsing for xAI Responses API output blocks. (#13049) Thanks @ereid7.
+ - Tools/web_search: normalize direct Perplexity model IDs while keeping OpenRouter model IDs unchanged. (#12795) Thanks @cdorsey.
+ - Model failover: treat HTTP 400 errors as failover-eligible, enabling automatic model fallback. (#1879) Thanks @orenyomtov.
+ - Errors: prevent false positive context overflow detection when conversation mentions "context overflow" topic. (#2078) Thanks @sbking.
+diff --git a/src/agents/tools/web-search.test.ts b/src/agents/tools/web-search.test.ts
+index e4ae31326..47ef32499 100644
+--- a/src/agents/tools/web-search.test.ts
++++ b/src/agents/tools/web-search.test.ts
+@@ -10,6 +10,7 @@ const {
+   resolveGrokApiKey,
+   resolveGrokModel,
+   resolveGrokInlineCitations,
++  extractGrokContent,
+ } = __testing;
+ 
+ describe("web_search perplexity baseUrl defaults", () => {
+@@ -142,3 +143,23 @@ describe("web_search grok config resolution", () => {
+     expect(resolveGrokInlineCitations({ inlineCitations: false })).toBe(false);
+   });
+ });
++
++describe("web_search grok response parsing", () => {
++  it("extracts content from Responses API output blocks", () => {
++    expect(
++      extractGrokContent({
++        output: [
++          {
++            content: [{ text: "hello from output" }],
++          },
++        ],
++      }),
++    ).toBe("hello from output");
++  });
++
++  it("falls back to deprecated output_text", () => {
++    expect(extractGrokContent({ output_text: "hello from output_text" })).toBe(
++      "hello from output_text",
++    );
++  });
++});
+diff --git a/src/agents/tools/web-search.ts b/src/agents/tools/web-search.ts
+index f303c2a2d..242049e9b 100644
+--- a/src/agents/tools/web-search.ts
++++ b/src/agents/tools/web-search.ts
+@@ -103,7 +103,15 @@ type GrokConfig = {
+ };
+ 
+ type GrokSearchResponse = {
+-  output_text?: string;
++  output?: Array<{
++    type?: string;
++    role?: string;
++    content?: Array<{
++      type?: string;
++      text?: string;
++    }>;
++  }>;
++  output_text?: string; // deprecated field - kept for backwards compatibility
+   citations?: string[];
+   inline_citations?: Array<{
+     start_index: number;
+@@ -123,6 +131,15 @@ type PerplexitySearchResponse = {
+ 
+ type PerplexityBaseUrlHint = "direct" | "openrouter";
+ 
++function extractGrokContent(data: GrokSearchResponse): string | undefined {
++  // xAI Responses API format: output[0].content[0].text
++  const fromResponses = data.output?.[0]?.content?.[0]?.text;
++  if (typeof fromResponses === "string" && fromResponses) {
++    return fromResponses;
++  }
++  return typeof data.output_text === "string" ? data.output_text : undefined;
++}
++
+ function resolveSearchConfig(cfg?: OpenClawConfig): WebSearchConfig {
+   const search = cfg?.tools?.web?.search;
+   if (!search || typeof search !== "object") {
+@@ -476,7 +493,7 @@ async function runGrokSearch(params: {
+   }
+ 
+   const data = (await res.json()) as GrokSearchResponse;
+-  const content = data.output_text ?? "No response";
++  const content = extractGrokContent(data) ?? "No response";
+   const citations = data.citations ?? [];
+   const inlineCitations = data.inline_citations;
+ 
+@@ -548,7 +565,7 @@ async function runWebSearch(params: {
+       provider: params.provider,
+       model: params.grokModel ?? DEFAULT_GROK_MODEL,
+       tookMs: Date.now() - start,
+-      content,
++      content: wrapWebContent(content),
+       citations,
+       inlineCitations,
+     };
+@@ -713,4 +730,5 @@ export const __testing = {
+   resolveGrokApiKey,
+   resolveGrokModel,
+   resolveGrokInlineCitations,
++  extractGrokContent,
+ } as const;
+-- 
+2.50.1 (Apple Git-155)
+

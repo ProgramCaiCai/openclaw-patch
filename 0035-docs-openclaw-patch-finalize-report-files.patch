@@ -1,0 +1,23 @@
+From db9569adedd64a6e598abe2fcc98ba024aa80f3f Mon Sep 17 00:00:00 2001
+From: programcaicai <programcaicai@programcaicaideMac-mini.local>
+Date: Tue, 10 Feb 2026 14:06:35 +0800
+Subject: [PATCH 35/44] docs(openclaw-patch): finalize report files
+
+---
+ reports/openclaw-patch/publish-log.md | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/reports/openclaw-patch/publish-log.md b/reports/openclaw-patch/publish-log.md
+index eda5484a0..10b6f75a1 100644
+--- a/reports/openclaw-patch/publish-log.md
++++ b/reports/openclaw-patch/publish-log.md
+@@ -56,5 +56,5 @@ To avoid local pack/object negotiation corruption, a clean clone was used:
+ 
+ ## Notes
+ 
+-- Original working branch in `/projects/openclaw` remains unchanged except local report/README edits for this task.
++- Original working branch in `/projects/openclaw` now includes an additional documentation commit for this task (`8d7fa14bc docs(openclaw-patch): add safe_call reports and README notes`).
+ - Publish succeeded using a clean-clone transport workaround due repeated remote unpack failures from the original local repository.
+-- 
+2.50.1 (Apple Git-155)
+

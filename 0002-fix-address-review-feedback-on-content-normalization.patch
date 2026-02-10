@@ -1,0 +1,30 @@
+From 43ad77d3c7ff595803f6f35322000127c14c286e Mon Sep 17 00:00:00 2001
+From: programcaicai <programcaicai@programcaicaideMac-mini.local>
+Date: Mon, 9 Feb 2026 23:00:39 +0800
+Subject: [PATCH 02/44] fix: address review feedback on content normalization
+
+---
+ src/agents/pi-embedded-runner/compact.ts | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/src/agents/pi-embedded-runner/compact.ts b/src/agents/pi-embedded-runner/compact.ts
+index 2a3f3849c..685e8d76e 100644
+--- a/src/agents/pi-embedded-runner/compact.ts
++++ b/src/agents/pi-embedded-runner/compact.ts
+@@ -119,7 +119,13 @@ function normalizeMessageContent(messages: Array<{ content?: unknown }>): void {
+     }
+     if (message.content == null) {
+       message.content = [];
++      continue;
++    }
++    if (typeof message.content === "object") {
++      message.content = [message.content];
++      continue;
+     }
++    message.content = [];
+   }
+ }
+ 
+-- 
+2.50.1 (Apple Git-155)
+

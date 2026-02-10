@@ -1,7 +1,7 @@
-From ec9598c1e9b4ca4fca24c9c5ed4a88f30c642d95 Mon Sep 17 00:00:00 2001
+From 8ac6541e319c9054ea446fc1ce7ca29d0ffbdc3f Mon Sep 17 00:00:00 2001
 From: programcaicai <programcaicai@programcaicaideMac-mini.local>
 Date: Tue, 10 Feb 2026 16:46:22 +0800
-Subject: [PATCH 12/12] feat(session_compact): add keepHead/keepTail
+Subject: [PATCH 40/44] feat(session_compact): add keepHead/keepTail
  turn-window compaction
 
 ---
@@ -184,7 +184,7 @@ index 783d59b76..3df5c54ba 100644
   * Compute adaptive chunk ratio based on average message size.
   * When messages are large, we use smaller chunks to avoid exceeding model limits.
 diff --git a/src/agents/pi-embedded-runner/compact.ts b/src/agents/pi-embedded-runner/compact.ts
-index 2a3f3849c..fc6a37445 100644
+index 685e8d76e..d3f2beba8 100644
 --- a/src/agents/pi-embedded-runner/compact.ts
 +++ b/src/agents/pi-embedded-runner/compact.ts
 @@ -1,3 +1,4 @@
@@ -223,7 +223,7 @@ index 2a3f3849c..fc6a37445 100644
    lane?: string;
    enqueue?: typeof enqueueCommand;
    extraSystemPrompt?: string;
-@@ -123,6 +134,24 @@ function normalizeMessageContent(messages: Array<{ content?: unknown }>): void {
+@@ -129,6 +140,24 @@ function normalizeMessageContent(messages: Array<{ content?: unknown }>): void {
    }
  }
  
@@ -248,7 +248,7 @@ index 2a3f3849c..fc6a37445 100644
  /**
   * Core compaction logic without lane queueing.
   * Use this when already inside a session/global lane to avoid deadlocks.
-@@ -452,14 +481,94 @@ export async function compactEmbeddedPiSessionDirect(
+@@ -458,14 +487,94 @@ export async function compactEmbeddedPiSessionDirect(
            session.agent.replaceMessages(limited);
          }
          normalizeMessageContent(session.messages as Array<{ content?: unknown }>);

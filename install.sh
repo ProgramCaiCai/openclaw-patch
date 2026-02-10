@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_URL="https://github.com/openclaw/openclaw.git"
-BASE_COMMIT="33c75cb6bf2dde53131f33a1ea4995e1aa8d550e"
+BASE_COMMIT="1d46ca3a95c7ff2669cc9c2a231fc460a2a3cbbb"
 TARGET_DIR="${1:-openclaw}"
 
 if [ -e "$TARGET_DIR" ]; then

@@ -1,0 +1,88 @@
+From d6248a775a0bd156dc00280c06510716efa3a597 Mon Sep 17 00:00:00 2001
+From: Rami Abdelrazzaq <ramiabdelrazzaq@gmail.com>
+Date: Mon, 9 Feb 2026 20:44:37 -0600
+Subject: [PATCH 09/44] fix: suggest /clear in context overflow error message
+ (#12973)
+
+* fix: suggest /reset in context overflow error message
+
+When the context window overflows, the error message now suggests
+using /reset to clear session history, giving users an actionable
+recovery path instead of a dead-end error.
+
+Closes #12940
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+
+* fix: suggest /reset in context overflow error message (#12973) (thanks @RamiNoodle733)
+
+---------
+
+Co-authored-by: Claude <noreply@anthropic.com>
+Co-authored-by: Rami Abdelrazzaq <RamiNoodle733@users.noreply.github.com>
+---
+ src/agents/pi-embedded-helpers.sanitizeuserfacingtext.test.ts | 4 ++--
+ src/agents/pi-embedded-helpers/errors.ts                      | 4 ++--
+ src/agents/pi-embedded-runner/run.ts                          | 2 +-
+ 3 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/src/agents/pi-embedded-helpers.sanitizeuserfacingtext.test.ts b/src/agents/pi-embedded-helpers.sanitizeuserfacingtext.test.ts
+index 3f975ce02..bde06a285 100644
+--- a/src/agents/pi-embedded-helpers.sanitizeuserfacingtext.test.ts
++++ b/src/agents/pi-embedded-helpers.sanitizeuserfacingtext.test.ts
+@@ -26,7 +26,7 @@ describe("sanitizeUserFacingText", () => {
+   it("sanitizes direct context-overflow errors", () => {
+     expect(
+       sanitizeUserFacingText(
+-        "Context overflow: prompt too large for the model. Try again with less input or a larger-context model.",
++        "Context overflow: prompt too large for the model. Try /reset (or /new) to start a fresh session, or use a larger-context model.",
+         { errorContext: true },
+       ),
+     ).toContain("Context overflow: prompt too large for the model.");
+@@ -37,7 +37,7 @@ describe("sanitizeUserFacingText", () => {
+ 
+   it("does not swallow assistant text that quotes the canonical context-overflow string", () => {
+     const text =
+-      "Changelog note: we fixed false positives for `Context overflow: prompt too large for the model. Try again with less input or a larger-context model.` in 2026.2.9";
++      "Changelog note: we fixed false positives for `Context overflow: prompt too large for the model. Try /reset (or /new) to start a fresh session, or use a larger-context model.` in 2026.2.9";
+     expect(sanitizeUserFacingText(text)).toBe(text);
+   });
+ 
+diff --git a/src/agents/pi-embedded-helpers/errors.ts b/src/agents/pi-embedded-helpers/errors.ts
+index 1e2b232ec..6138c4d5c 100644
+--- a/src/agents/pi-embedded-helpers/errors.ts
++++ b/src/agents/pi-embedded-helpers/errors.ts
+@@ -354,7 +354,7 @@ export function formatAssistantErrorText(
+   if (isContextOverflowError(raw)) {
+     return (
+       "Context overflow: prompt too large for the model. " +
+-      "Try again with less input or a larger-context model."
++      "Try /reset (or /new) to start a fresh session, or use a larger-context model."
+     );
+   }
+ 
+@@ -426,7 +426,7 @@ export function sanitizeUserFacingText(text: string, opts?: { errorContext?: boo
+     if (shouldRewriteContextOverflowText(trimmed)) {
+       return (
+         "Context overflow: prompt too large for the model. " +
+-        "Try again with less input or a larger-context model."
++        "Try /reset (or /new) to start a fresh session, or use a larger-context model."
+       );
+     }
+ 
+diff --git a/src/agents/pi-embedded-runner/run.ts b/src/agents/pi-embedded-runner/run.ts
+index 268c26303..7fa46ced3 100644
+--- a/src/agents/pi-embedded-runner/run.ts
++++ b/src/agents/pi-embedded-runner/run.ts
+@@ -580,7 +580,7 @@ export async function runEmbeddedPiAgent(
+                 {
+                   text:
+                     "Context overflow: prompt too large for the model. " +
+-                    "Try again with less input or a larger-context model.",
++                    "Try /reset (or /new) to start a fresh session, or use a larger-context model.",
+                   isError: true,
+                 },
+               ],
+-- 
+2.50.1 (Apple Git-155)
+

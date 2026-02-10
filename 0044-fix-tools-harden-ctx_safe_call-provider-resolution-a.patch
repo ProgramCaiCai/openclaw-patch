@@ -1,0 +1,509 @@
+From d78c01d4757b2906f64f0c5e01a215535350e121 Mon Sep 17 00:00:00 2001
+From: programcaicai <programcaicai@programcaicaideMac-mini.local>
+Date: Tue, 10 Feb 2026 18:38:05 +0800
+Subject: [PATCH 44/44] fix(tools): harden ctx_safe_call provider resolution
+ and signal propagation
+
+---
+ .../fix-review-issues.md                      |  51 ++++++++
+ src/agents/openclaw-tools.ts                  |  35 +++--
+ ...tools.ctx-safe-call-provider-tools.test.ts |  67 +++++++++-
+ src/agents/pi-tools.ts                        | 122 ++++++++++++------
+ src/agents/tools/ctx-safe-call-tool.test.ts   |  57 ++++++++
+ src/agents/tools/ctx-safe-call-tool.ts        |   4 +-
+ 6 files changed, 275 insertions(+), 61 deletions(-)
+ create mode 100644 reports/ctx-safe-call-provider-tools/fix-review-issues.md
+
+diff --git a/reports/ctx-safe-call-provider-tools/fix-review-issues.md b/reports/ctx-safe-call-provider-tools/fix-review-issues.md
+new file mode 100644
+index 000000000..3d239e3ee
+--- /dev/null
++++ b/reports/ctx-safe-call-provider-tools/fix-review-issues.md
+@@ -0,0 +1,51 @@
++# ctx_safe_call provider tools review fixes
++
++## Scope
++
++- Branch: `fix/compact-content-normalize`
++- Task: fix Critical + Major review findings for `ctx_safe_call` provider tool resolution and propagation behavior.
++
++## Fixes implemented
++
++### 1) Critical: policy/hook bypass via pre-policy provider capture
++
++- File: `src/agents/pi-tools.ts`
++- Reworked `ctx_safe_call` resolution to use a deferred resolver (`ctxSafeCallResolveToolsRef`) that is populated **after** policy filtering, schema normalization, before-tool-call wrapping, and abort wrapping.
++- Added provider-tool tagging (`read`/`exec`/`process`) so `ctx_safe_call` can resolve provider tools only from the final wrapped tool set.
++- Removed pre-policy `ctxSafeCallProviderTools` capture in `pi-tools.ts`.
++
++### 2) Major: plugin naming collision (`read`/`exec`/`process`)
++
++- File: `src/agents/openclaw-tools.ts`
++- Added `ctxSafeCallResolveTool` override option for `createOpenClawTools`, used by `pi-tools.ts` to resolve against final wrapped tools.
++- Improved fallback resolver to prioritize provider mapping before plugin/core wrapped lookup.
++- Added provider names to `existingToolNames` when ctx-safe provider resolution is configured, reducing plugin collision risk at registration time.
++
++### 3) Major: abort signal / onUpdate propagation
++
++- File: `src/agents/tools/ctx-safe-call-tool.ts`
++- Updated `ctx_safe_call` execute signature to accept `(toolCallId, args, signal, onUpdate)`.
++- Forwarded `signal` and `onUpdate` to wrapped target tool execution.
++
++## Tests added/updated
++
++### Updated
++
++- `src/agents/pi-tools.ctx-safe-call-provider-tools.test.ts`
++  - Added regression: denied `exec` cannot be invoked through allowed `ctx_safe_call`.
++  - Added collision regression: plugin tool named `read` does not hijack provider resolution.
++
++- `src/agents/tools/ctx-safe-call-tool.test.ts`
++  - Added propagation test: abort signal and `onUpdate` are forwarded to wrapped tool.
++
++## Validation
++
++- Ran:
++  - `npx vitest run src/agents/tools/ctx-safe-call-tool.test.ts src/agents/pi-tools.ctx-safe-call-provider-tools.test.ts`
++  - `npm run build`
++- Result: all targeted tests passed, build succeeded.
++
++## Commit
++
++- Commit created with conventional message:
++  - `fix(tools): harden ctx_safe_call provider resolution and signal propagation`
+diff --git a/src/agents/openclaw-tools.ts b/src/agents/openclaw-tools.ts
+index 15b3075b3..cbd8b7f5f 100644
+--- a/src/agents/openclaw-tools.ts
++++ b/src/agents/openclaw-tools.ts
+@@ -63,6 +63,8 @@ export function createOpenClawTools(options?: {
+   disableMessageTool?: boolean;
+   /** Additional provider-layer tools that ctx_safe_call can wrap (e.g. read/exec/process). */
+   ctxSafeCallProviderTools?: AnyAgentTool[];
++  /** Optional override for ctx_safe_call target resolution. */
++  ctxSafeCallResolveTool?: (name: string) => AnyAgentTool | undefined;
+ }): AnyAgentTool[] {
+   const imageTool = options?.agentDir?.trim()
+     ? createImageTool({
+@@ -164,6 +166,14 @@ export function createOpenClawTools(options?: {
+     ...(imageTool ? [imageTool] : []),
+   ];
+ 
++  const providerToolNames = new Set(["read", "exec", "process"]);
++  const existingToolNames = new Set([...coreTools.map((tool) => tool.name), "ctx_safe_call"]);
++  if ((options?.ctxSafeCallProviderTools?.length ?? 0) > 0 || options?.ctxSafeCallResolveTool) {
++    for (const providerToolName of providerToolNames) {
++      existingToolNames.add(providerToolName);
++    }
++  }
++
+   const pluginTools = resolvePluginTools({
+     context: {
+       config: options?.config,
+@@ -175,25 +185,22 @@ export function createOpenClawTools(options?: {
+       agentAccountId: options?.agentAccountId,
+       sandboxed: options?.sandboxed,
+     },
+-    existingToolNames: new Set([...coreTools.map((tool) => tool.name), "ctx_safe_call"]),
++    existingToolNames,
+     toolAllowlist: options?.pluginToolAllowlist,
+   });
+ 
+   const wrappedTools = [...coreTools, ...pluginTools];
+-  const providerToolNames = new Set(["read", "exec", "process"]);
+-  const ctxSafeCallTool = createCtxSafeCallTool({
+-    resolveTool: (name) => {
+-      const wrapped = wrappedTools.find(
+-        (tool) => tool.name === name && tool.name !== "ctx_safe_call",
+-      );
+-      if (wrapped) {
+-        return wrapped;
++  const fallbackResolveTool = (name: string) => {
++    if (providerToolNames.has(name)) {
++      const providerTool = options?.ctxSafeCallProviderTools?.find((tool) => tool.name === name);
++      if (providerTool) {
++        return providerTool;
+       }
+-      if (!providerToolNames.has(name)) {
+-        return undefined;
+-      }
+-      return options?.ctxSafeCallProviderTools?.find((tool) => tool.name === name);
+-    },
++    }
++    return wrappedTools.find((tool) => tool.name === name && tool.name !== "ctx_safe_call");
++  };
++  const ctxSafeCallTool = createCtxSafeCallTool({
++    resolveTool: options?.ctxSafeCallResolveTool ?? fallbackResolveTool,
+   });
+ 
+   return [...wrappedTools, ctxSafeCallTool];
+diff --git a/src/agents/pi-tools.ctx-safe-call-provider-tools.test.ts b/src/agents/pi-tools.ctx-safe-call-provider-tools.test.ts
+index 85c37bd5c..ad1e15a48 100644
+--- a/src/agents/pi-tools.ctx-safe-call-provider-tools.test.ts
++++ b/src/agents/pi-tools.ctx-safe-call-provider-tools.test.ts
+@@ -1,12 +1,16 @@
+ import fs from "node:fs/promises";
+ import os from "node:os";
+ import path from "node:path";
+-import { describe, expect, it, vi } from "vitest";
++import { beforeEach, describe, expect, it, vi } from "vitest";
++import type { OpenClawConfig } from "../config/config.js";
++import type { AnyAgentTool } from "./pi-tools.types.js";
+ import { createOpenClawCodingTools } from "./pi-tools.js";
+ 
++const pluginToolsState = vi.hoisted(() => ({ tools: [] as AnyAgentTool[] }));
++
+ vi.mock("../plugins/tools.js", () => ({
+   getPluginToolMeta: () => undefined,
+-  resolvePluginTools: () => [],
++  resolvePluginTools: () => pluginToolsState.tools,
+ }));
+ 
+ vi.mock("../infra/shell-env.js", async (importOriginal) => {
+@@ -23,8 +27,8 @@ async function withTempDir<T>(prefix: string, fn: (dir: string) => Promise<T>) {
+   }
+ }
+ 
+-function getCtxSafeCallTool(workspaceDir: string) {
+-  const tools = createOpenClawCodingTools({ workspaceDir });
++function getCtxSafeCallTool(workspaceDir: string, options?: { config?: OpenClawConfig }) {
++  const tools = createOpenClawCodingTools({ workspaceDir, config: options?.config });
+   const tool = tools.find((candidate) => candidate.name === "ctx_safe_call");
+   expect(tool).toBeDefined();
+   if (!tool) {
+@@ -34,6 +38,10 @@ function getCtxSafeCallTool(workspaceDir: string) {
+ }
+ 
+ describe("ctx_safe_call provider tools", () => {
++  beforeEach(() => {
++    pluginToolsState.tools = [];
++  });
++
+   it("wraps read", async () => {
+     await withTempDir("openclaw-ctx-read-", async (workspaceDir) => {
+       await fs.writeFile(path.join(workspaceDir, "note.txt"), "ctx-read-ok", "utf8");
+@@ -85,4 +93,55 @@ describe("ctx_safe_call provider tools", () => {
+       expect(details.output).toContain("sessions");
+     });
+   });
++
++  it("does not bypass denied provider tools", async () => {
++    await withTempDir("openclaw-ctx-deny-", async (workspaceDir) => {
++      const config: OpenClawConfig = {
++        tools: {
++          allow: ["ctx_safe_call"],
++          deny: ["exec"],
++        },
++      };
++      const ctxSafeCall = getCtxSafeCallTool(workspaceDir, { config });
++
++      await expect(
++        ctxSafeCall.execute("ctx-denied-exec", {
++          tool: "exec",
++          params: { command: "printf 'blocked'" },
++        }),
++      ).rejects.toThrow("Unknown tool: exec");
++    });
++  });
++
++  it("keeps provider tool precedence when plugin names collide", async () => {
++    const pluginReadExecute = vi.fn(async () => ({
++      content: [{ type: "text", text: "plugin-read" }],
++      details: { output: "plugin-read" },
++    }));
++    pluginToolsState.tools = [
++      {
++        label: "Plugin Read",
++        name: "read",
++        description: "plugin read",
++        parameters: {},
++        execute: pluginReadExecute,
++      } satisfies AnyAgentTool,
++    ];
++
++    await withTempDir("openclaw-ctx-plugin-read-", async (workspaceDir) => {
++      await fs.writeFile(path.join(workspaceDir, "note.txt"), "provider-read-ok", "utf8");
++      const ctxSafeCall = getCtxSafeCallTool(workspaceDir);
++
++      const result = await ctxSafeCall.execute("ctx-provider-priority", {
++        tool: "read",
++        params: { path: "note.txt" },
++      });
++
++      const details = result.details as { tool: string; output: string };
++      expect(details.tool).toBe("read");
++      expect(details.output).toContain("provider-read-ok");
++      expect(details.output).not.toContain("plugin-read");
++      expect(pluginReadExecute).not.toHaveBeenCalled();
++    });
++  });
+ });
+diff --git a/src/agents/pi-tools.ts b/src/agents/pi-tools.ts
+index 1f4ff8d85..e8eefb8ef 100644
+--- a/src/agents/pi-tools.ts
++++ b/src/agents/pi-tools.ts
+@@ -112,6 +112,30 @@ export const __testing = {
+   assertRequiredParams,
+ } as const;
+ 
++const CTX_SAFE_CALL_PROVIDER_TOOL = Symbol("ctxSafeCallProviderTool");
++type CtxSafeCallProviderToolName = "read" | "exec" | "process";
++type CtxSafeCallProviderTool = AnyAgentTool & {
++  [CTX_SAFE_CALL_PROVIDER_TOOL]?: CtxSafeCallProviderToolName;
++};
++
++function markCtxSafeCallProviderTool(
++  tool: AnyAgentTool,
++  providerName: CtxSafeCallProviderToolName,
++): AnyAgentTool {
++  (tool as CtxSafeCallProviderTool)[CTX_SAFE_CALL_PROVIDER_TOOL] = providerName;
++  return tool;
++}
++
++function getCtxSafeCallProviderToolName(
++  tool: AnyAgentTool,
++): CtxSafeCallProviderToolName | undefined {
++  return (tool as CtxSafeCallProviderTool)[CTX_SAFE_CALL_PROVIDER_TOOL];
++}
++
++function isCtxSafeCallProviderToolName(name: string): name is CtxSafeCallProviderToolName {
++  return name === "read" || name === "exec" || name === "process";
++}
++
+ export function createOpenClawCodingTools(options?: {
+   exec?: ExecToolDefaults & ProcessToolDefaults;
+   messageProvider?: string;
+@@ -247,10 +271,10 @@ export function createOpenClawCodingTools(options?: {
+   const base = (codingTools as unknown as AnyAgentTool[]).flatMap((tool) => {
+     if (tool.name === readTool.name) {
+       if (sandboxRoot) {
+-        return [createSandboxedReadTool(sandboxRoot)];
++        return [markCtxSafeCallProviderTool(createSandboxedReadTool(sandboxRoot), "read")];
+       }
+       const freshReadTool = createReadTool(workspaceRoot);
+-      return [createOpenClawReadTool(freshReadTool)];
++      return [markCtxSafeCallProviderTool(createOpenClawReadTool(freshReadTool), "read")];
+     }
+     if (tool.name === "bash" || tool.name === execToolName) {
+       return [];
+@@ -274,38 +298,44 @@ export function createOpenClawCodingTools(options?: {
+     return [tool];
+   });
+   const { cleanupMs: cleanupMsOverride, ...execDefaults } = options?.exec ?? {};
+-  const execTool = createExecTool({
+-    ...execDefaults,
+-    host: options?.exec?.host ?? execConfig.host,
+-    security: options?.exec?.security ?? execConfig.security,
+-    ask: options?.exec?.ask ?? execConfig.ask,
+-    node: options?.exec?.node ?? execConfig.node,
+-    pathPrepend: options?.exec?.pathPrepend ?? execConfig.pathPrepend,
+-    safeBins: options?.exec?.safeBins ?? execConfig.safeBins,
+-    agentId,
+-    cwd: options?.workspaceDir,
+-    allowBackground,
+-    scopeKey,
+-    sessionKey: options?.sessionKey,
+-    messageProvider: options?.messageProvider,
+-    backgroundMs: options?.exec?.backgroundMs ?? execConfig.backgroundMs,
+-    timeoutSec: options?.exec?.timeoutSec ?? execConfig.timeoutSec,
+-    approvalRunningNoticeMs:
+-      options?.exec?.approvalRunningNoticeMs ?? execConfig.approvalRunningNoticeMs,
+-    notifyOnExit: options?.exec?.notifyOnExit ?? execConfig.notifyOnExit,
+-    sandbox: sandbox
+-      ? {
+-          containerName: sandbox.containerName,
+-          workspaceDir: sandbox.workspaceDir,
+-          containerWorkdir: sandbox.containerWorkdir,
+-          env: sandbox.docker.env,
+-        }
+-      : undefined,
+-  });
+-  const processTool = createProcessTool({
+-    cleanupMs: cleanupMsOverride ?? execConfig.cleanupMs,
+-    scopeKey,
+-  });
++  const execTool = markCtxSafeCallProviderTool(
++    createExecTool({
++      ...execDefaults,
++      host: options?.exec?.host ?? execConfig.host,
++      security: options?.exec?.security ?? execConfig.security,
++      ask: options?.exec?.ask ?? execConfig.ask,
++      node: options?.exec?.node ?? execConfig.node,
++      pathPrepend: options?.exec?.pathPrepend ?? execConfig.pathPrepend,
++      safeBins: options?.exec?.safeBins ?? execConfig.safeBins,
++      agentId,
++      cwd: options?.workspaceDir,
++      allowBackground,
++      scopeKey,
++      sessionKey: options?.sessionKey,
++      messageProvider: options?.messageProvider,
++      backgroundMs: options?.exec?.backgroundMs ?? execConfig.backgroundMs,
++      timeoutSec: options?.exec?.timeoutSec ?? execConfig.timeoutSec,
++      approvalRunningNoticeMs:
++        options?.exec?.approvalRunningNoticeMs ?? execConfig.approvalRunningNoticeMs,
++      notifyOnExit: options?.exec?.notifyOnExit ?? execConfig.notifyOnExit,
++      sandbox: sandbox
++        ? {
++            containerName: sandbox.containerName,
++            workspaceDir: sandbox.workspaceDir,
++            containerWorkdir: sandbox.containerWorkdir,
++            env: sandbox.docker.env,
++          }
++        : undefined,
++    }) as unknown as AnyAgentTool,
++    "exec",
++  );
++  const processTool = markCtxSafeCallProviderTool(
++    createProcessTool({
++      cleanupMs: cleanupMsOverride ?? execConfig.cleanupMs,
++      scopeKey,
++    }) as unknown as AnyAgentTool,
++    "process",
++  );
+   const applyPatchTool =
+     !applyPatchEnabled || (sandboxRoot && !allowWorkspaceWrites)
+       ? null
+@@ -313,11 +343,7 @@ export function createOpenClawCodingTools(options?: {
+           cwd: sandboxRoot ?? workspaceRoot,
+           sandboxRoot: sandboxRoot && allowWorkspaceWrites ? sandboxRoot : undefined,
+         });
+-  const ctxSafeCallProviderTools = [
+-    base.find((tool) => tool.name === "read"),
+-    execTool as unknown as AnyAgentTool,
+-    processTool as unknown as AnyAgentTool,
+-  ].filter((tool): tool is AnyAgentTool => !!tool);
++  const ctxSafeCallResolveToolsRef: { tools: AnyAgentTool[] } = { tools: [] };
+   const tools: AnyAgentTool[] = [
+     ...base,
+     ...(sandboxRoot
+@@ -326,8 +352,8 @@ export function createOpenClawCodingTools(options?: {
+         : []
+       : []),
+     ...(applyPatchTool ? [applyPatchTool as unknown as AnyAgentTool] : []),
+-    execTool as unknown as AnyAgentTool,
+-    processTool as unknown as AnyAgentTool,
++    execTool,
++    processTool,
+     // Channel docking: include channel-defined agent tools (login, etc.).
+     ...listChannelAgentTools({ cfg: options?.config }),
+     ...createOpenClawTools({
+@@ -366,7 +392,16 @@ export function createOpenClawCodingTools(options?: {
+       requireExplicitMessageTarget: options?.requireExplicitMessageTarget,
+       disableMessageTool: options?.disableMessageTool,
+       requesterAgentIdOverride: agentId,
+-      ctxSafeCallProviderTools,
++      ctxSafeCallResolveTool: (name) => {
++        if (name === "ctx_safe_call") {
++          return undefined;
++        }
++        const finalTools = ctxSafeCallResolveToolsRef.tools;
++        if (isCtxSafeCallProviderToolName(name)) {
++          return finalTools.find((tool) => getCtxSafeCallProviderToolName(tool) === name);
++        }
++        return finalTools.find((tool) => tool.name === name && tool.name !== "ctx_safe_call");
++      },
+     }),
+   ];
+   // Security: treat unknown/undefined as unauthorized (opt-in, not opt-out)
+@@ -455,6 +490,9 @@ export function createOpenClawCodingTools(options?: {
+     ? withHooks.map((tool) => wrapToolWithAbortSignal(tool, options.abortSignal))
+     : withHooks;
+ 
++  // Resolve ctx_safe_call targets from the final, policy-filtered wrapped tool set.
++  ctxSafeCallResolveToolsRef.tools = withAbort;
++
+   // NOTE: Keep canonical (lowercase) tool names here.
+   // pi-ai's Anthropic OAuth transport remaps tool names to Claude Code-style names
+   // on the wire and maps them back for tool dispatch.
+diff --git a/src/agents/tools/ctx-safe-call-tool.test.ts b/src/agents/tools/ctx-safe-call-tool.test.ts
+index a916b4563..1f53751bc 100644
+--- a/src/agents/tools/ctx-safe-call-tool.test.ts
++++ b/src/agents/tools/ctx-safe-call-tool.test.ts
+@@ -266,6 +266,63 @@ describe("ctx_safe_call tool", () => {
+     expect(details.output.length).toBeLessThanOrEqual(1);
+   });
+ 
++  it("propagates abort signal and onUpdate to wrapped tools", async () => {
++    const abortError = Object.assign(new Error("aborted"), { name: "AbortError" });
++    const updates: unknown[] = [];
++    let receivedSignal: AbortSignal | undefined;
++    let receivedOnUpdate: ((payload: unknown) => void) | undefined;
++
++    const stub: AnyAgentTool = {
++      label: "Stub",
++      name: "stub",
++      description: "stub tool",
++      parameters: {},
++      execute: async (_toolCallId, _params, signal, onUpdate) => {
++        receivedSignal = signal;
++        receivedOnUpdate = onUpdate;
++        onUpdate?.({ phase: "started" });
++        return await new Promise((_, reject) => {
++          if (signal?.aborted) {
++            reject(abortError);
++            return;
++          }
++          signal?.addEventListener(
++            "abort",
++            () => {
++              reject(abortError);
++            },
++            { once: true },
++          );
++        });
++      },
++    };
++
++    const tool = createCtxSafeCallTool({
++      resolveTool: (name) => (name === "stub" ? stub : undefined),
++    });
++    const controller = new AbortController();
++
++    const pending = tool.execute(
++      "call-11",
++      {
++        tool: "stub",
++        params: {},
++      },
++      controller.signal,
++      (payload) => {
++        updates.push(payload);
++      },
++    );
++
++    await Promise.resolve();
++    controller.abort();
++
++    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
++    expect(receivedSignal).toBe(controller.signal);
++    expect(typeof receivedOnUpdate).toBe("function");
++    expect(updates).toEqual([{ phase: "started" }]);
++  });
++
+   it("does not emit dangling surrogates after truncation", async () => {
+     const stub = createStubTool(`START-${"😀".repeat(80)}-END`);
+     const tool = createCtxSafeCallTool({
+diff --git a/src/agents/tools/ctx-safe-call-tool.ts b/src/agents/tools/ctx-safe-call-tool.ts
+index 580b0259b..2d0aebdcc 100644
+--- a/src/agents/tools/ctx-safe-call-tool.ts
++++ b/src/agents/tools/ctx-safe-call-tool.ts
+@@ -345,7 +345,7 @@ export function createCtxSafeCallTool(options: CtxSafeCallToolOptions): AnyAgent
+     description:
+       "Call another tool and safely post-process its output with field filtering, pagination, and maxChars truncation.",
+     parameters: CtxSafeCallToolSchema,
+-    execute: async (toolCallId, args) => {
++    execute: async (toolCallId, args, signal, onUpdate) => {
+       const params = args as Record<string, unknown>;
+       const toolName = readStringParam(params, "tool", { required: true });
+       if (toolName === "ctx_safe_call") {
+@@ -387,6 +387,8 @@ export function createCtxSafeCallTool(options: CtxSafeCallToolOptions): AnyAgent
+       const targetResult = await target.execute(
+         `${toolCallId}:ctx_safe_call:${toolName}`,
+         targetParams,
++        signal,
++        onUpdate,
+       );
+       const payload = extractPayload(targetResult);
+ 
+-- 
+2.50.1 (Apple Git-155)
+

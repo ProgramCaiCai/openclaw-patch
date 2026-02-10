@@ -1,0 +1,413 @@
+From 66377bb381b952aa3f941d4330dc6c03a1866c51 Mon Sep 17 00:00:00 2001
+From: quotentiroler <max.nussbaumer@maxhealth.tech>
+Date: Mon, 9 Feb 2026 19:21:33 -0800
+Subject: [PATCH 13/44] Update contributing, deduplicate more functions
+
+---
+ CONTRIBUTING.md                              | 20 +++--------
+ docs/reference/credits.md                    | 20 +++++++++++
+ extensions/google-antigravity-auth/index.ts  | 28 ++--------------
+ extensions/google-gemini-cli-auth/oauth.ts   | 27 ++-------------
+ extensions/nextcloud-talk/src/accounts.ts    | 11 +-----
+ src/agents/model-fallback.ts                 |  6 ++--
+ src/agents/pi-embedded-runner/abort.ts       | 18 +++++++++-
+ src/agents/pi-embedded-runner/run/attempt.ts |  4 +--
+ src/commands/onboard-helpers.ts              | 13 +-------
+ src/gateway/net.ts                           |  2 +-
+ src/infra/unhandled-rejections.ts            | 10 +++---
+ src/infra/wsl.ts                             | 35 ++++++++++++++++++++
+ src/plugin-sdk/index.ts                      |  2 ++
+ 13 files changed, 96 insertions(+), 100 deletions(-)
+
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index 169e0dcb9..b038f2b81 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -8,22 +8,9 @@ Welcome to the lobster tank! 🦞
+ - **Discord:** https://discord.gg/qkhbAGHRBT
+ - **X/Twitter:** [@steipete](https://x.com/steipete) / [@openclaw](https://x.com/openclaw)
+ 
+-## Maintainers
++## Contributors
+ 
+-- **Peter Steinberger** - Benevolent Dictator
+-  - GitHub: [@steipete](https://github.com/steipete) · X: [@steipete](https://x.com/steipete)
+-
+-- **Shadow** - Discord + Slack subsystem
+-  - GitHub: [@thewilloftheshadow](https://github.com/thewilloftheshadow) · X: [@4shad0wed](https://x.com/4shad0wed)
+-
+-- **Jos** - Telegram, API, Nix mode
+-  - GitHub: [@joshp123](https://github.com/joshp123) · X: [@jjpcodes](https://x.com/jjpcodes)
+-
+-- **Christoph Nakazawa** - JS Infra
+-  - GitHub: [@cpojer](https://github.com/cpojer) · X: [@cnakazawa](https://x.com/cnakazawa)
+-
+-- **Gustavo Madeira Santana** - Multi-agents, CLI, web UI
+-  - GitHub: [@gumadeiras](https://github.com/gumadeiras) · X: [@gumadeiras](https://x.com/gumadeiras)
++See [Credits & Maintainers](https://docs.openclaw.ai/reference/credits) for the full list.
+ 
+ ## How to Contribute
+ 
+@@ -35,6 +22,7 @@ Welcome to the lobster tank! 🦞
+ 
+ - Test locally with your OpenClaw instance
+ - Run tests: `pnpm build && pnpm check && pnpm test`
++- Ensure CI checks pass
+ - Keep PRs focused (one thing per PR)
+ - Describe what & why
+ 
+@@ -72,7 +60,7 @@ We are currently prioritizing:
+ 
+ - **Stability**: Fixing edge cases in channel connections (WhatsApp/Telegram).
+ - **UX**: Improving the onboarding wizard and error messages.
+-- **Skills**: Expanding the library of bundled skills and improving the Skill Creation developer experience.
++- **Skills**: For skill contributions, head to [ClawHub](https://clawhub.ai/) — the community hub for OpenClaw skills.
+ - **Performance**: Optimizing token usage and compaction logic.
+ 
+ Check the [GitHub Issues](https://github.com/openclaw/openclaw/issues) for "good first issue" labels!
+diff --git a/docs/reference/credits.md b/docs/reference/credits.md
+index 67e85ca72..631ce750d 100644
+--- a/docs/reference/credits.md
++++ b/docs/reference/credits.md
+@@ -15,6 +15,26 @@ OpenClaw = CLAW + TARDIS, because every space lobster needs a time and space mac
+ - **Mario Zechner** ([@badlogicc](https://x.com/badlogicgames)) - Pi creator, security pen tester
+ - **Clawd** - The space lobster who demanded a better name
+ 
++## Maintainers
++
++- **Peter Steinberger** - Benevolent Dictator
++  - GitHub: [@steipete](https://github.com/steipete) · X: [@steipete](https://x.com/steipete)
++
++- **Shadow** - Discord + Slack subsystem
++  - GitHub: [@thewilloftheshadow](https://github.com/thewilloftheshadow) · X: [@4shad0wed](https://x.com/4shad0wed)
++
++- **Jos** - Telegram, API, Nix mode
++  - GitHub: [@joshp123](https://github.com/joshp123) · X: [@jjpcodes](https://x.com/jjpcodes)
++
++- **Christoph Nakazawa** - JS Infra
++  - GitHub: [@cpojer](https://github.com/cpojer) · X: [@cnakazawa](https://x.com/cnakazawa)
++
++- **Gustavo Madeira Santana** - Multi-agents, CLI, web UI
++  - GitHub: [@gumadeiras](https://github.com/gumadeiras) · X: [@gumadeiras](https://x.com/gumadeiras)
++
++- **Maximilian Nussbaumer** - DevOps, CI, Code Sanity
++  - GitHub: [@quotentiroler](https://github.com/quotentiroler) · X: [@quotentiroler](https://x.com/quotentiroler)
++
+ ## Core contributors
+ 
+ - **Maxim Vovshin** (@Hyaxia, [36747317+Hyaxia@users.noreply.github.com](mailto:36747317+Hyaxia@users.noreply.github.com)) - Blogwatcher skill
+diff --git a/extensions/google-antigravity-auth/index.ts b/extensions/google-antigravity-auth/index.ts
+index 38c686ac4..15f1bf1ee 100644
+--- a/extensions/google-antigravity-auth/index.ts
++++ b/extensions/google-antigravity-auth/index.ts
+@@ -1,8 +1,8 @@
+ import { createHash, randomBytes } from "node:crypto";
+-import { readFileSync } from "node:fs";
+ import { createServer } from "node:http";
+ import {
+   emptyPluginConfigSchema,
++  isWSL2Sync,
+   type OpenClawPluginApi,
+   type ProviderAuthContext,
+ } from "openclaw/plugin-sdk";
+@@ -52,32 +52,8 @@ function generatePkce(): { verifier: string; challenge: string } {
+   return { verifier, challenge };
+ }
+ 
+-function isWSL(): boolean {
+-  if (process.platform !== "linux") {
+-    return false;
+-  }
+-  try {
+-    const release = readFileSync("/proc/version", "utf8").toLowerCase();
+-    return release.includes("microsoft") || release.includes("wsl");
+-  } catch {
+-    return false;
+-  }
+-}
+-
+-function isWSL2(): boolean {
+-  if (!isWSL()) {
+-    return false;
+-  }
+-  try {
+-    const version = readFileSync("/proc/version", "utf8").toLowerCase();
+-    return version.includes("wsl2") || version.includes("microsoft-standard");
+-  } catch {
+-    return false;
+-  }
+-}
+-
+ function shouldUseManualOAuthFlow(isRemote: boolean): boolean {
+-  return isRemote || isWSL2();
++  return isRemote || isWSL2Sync();
+ }
+ 
+ function buildAuthUrl(params: { challenge: string; state: string }): string {
+diff --git a/extensions/google-gemini-cli-auth/oauth.ts b/extensions/google-gemini-cli-auth/oauth.ts
+index 5d386f210..7977ab529 100644
+--- a/extensions/google-gemini-cli-auth/oauth.ts
++++ b/extensions/google-gemini-cli-auth/oauth.ts
+@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
+ import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+ import { createServer } from "node:http";
+ import { delimiter, dirname, join } from "node:path";
++import { isWSL2Sync } from "openclaw/plugin-sdk";
+ 
+ const CLIENT_ID_KEYS = ["OPENCLAW_GEMINI_OAUTH_CLIENT_ID", "GEMINI_CLI_OAUTH_CLIENT_ID"];
+ const CLIENT_SECRET_KEYS = [
+@@ -177,32 +178,8 @@ function resolveOAuthClientConfig(): { clientId: string; clientSecret?: string }
+   );
+ }
+ 
+-function isWSL(): boolean {
+-  if (process.platform !== "linux") {
+-    return false;
+-  }
+-  try {
+-    const release = readFileSync("/proc/version", "utf8").toLowerCase();
+-    return release.includes("microsoft") || release.includes("wsl");
+-  } catch {
+-    return false;
+-  }
+-}
+-
+-function isWSL2(): boolean {
+-  if (!isWSL()) {
+-    return false;
+-  }
+-  try {
+-    const version = readFileSync("/proc/version", "utf8").toLowerCase();
+-    return version.includes("wsl2") || version.includes("microsoft-standard");
+-  } catch {
+-    return false;
+-  }
+-}
+-
+ function shouldUseManualOAuthFlow(isRemote: boolean): boolean {
+-  return isRemote || isWSL2();
++  return isRemote || isWSL2Sync();
+ }
+ 
+ function generatePkce(): { verifier: string; challenge: string } {
+diff --git a/extensions/nextcloud-talk/src/accounts.ts b/extensions/nextcloud-talk/src/accounts.ts
+index c28699446..344aa2b8d 100644
+--- a/extensions/nextcloud-talk/src/accounts.ts
++++ b/extensions/nextcloud-talk/src/accounts.ts
+@@ -1,16 +1,7 @@
+ import { readFileSync } from "node:fs";
+-import { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "openclaw/plugin-sdk";
++import { DEFAULT_ACCOUNT_ID, isTruthyEnvValue, normalizeAccountId } from "openclaw/plugin-sdk";
+ import type { CoreConfig, NextcloudTalkAccountConfig } from "./types.js";
+ 
+-const TRUTHY_ENV = new Set(["true", "1", "yes", "on"]);
+-
+-function isTruthyEnvValue(value?: string): boolean {
+-  if (!value) {
+-    return false;
+-  }
+-  return TRUTHY_ENV.has(value.trim().toLowerCase());
+-}
+-
+ const debugAccounts = (...args: unknown[]) => {
+   if (isTruthyEnvValue(process.env.OPENCLAW_DEBUG_NEXTCLOUD_TALK_ACCOUNTS)) {
+     console.warn("[nextcloud-talk:accounts]", ...args);
+diff --git a/src/agents/model-fallback.ts b/src/agents/model-fallback.ts
+index 38150d72c..79d0b6d0b 100644
+--- a/src/agents/model-fallback.ts
++++ b/src/agents/model-fallback.ts
+@@ -35,10 +35,10 @@ type FallbackAttempt = {
+ };
+ 
+ /**
+- * Strict abort check for model fallback. Only treats explicit AbortError names as user aborts.
++ * Fallback abort check. Only treats explicit AbortError names as user aborts.
+  * Message-based checks (e.g., "aborted") can mask timeouts and skip fallback.
+  */
+-function isStrictAbortError(err: unknown): boolean {
++function isFallbackAbortError(err: unknown): boolean {
+   if (!err || typeof err !== "object") {
+     return false;
+   }
+@@ -50,7 +50,7 @@ function isStrictAbortError(err: unknown): boolean {
+ }
+ 
+ function shouldRethrowAbort(err: unknown): boolean {
+-  return isStrictAbortError(err) && !isTimeoutError(err);
++  return isFallbackAbortError(err) && !isTimeoutError(err);
+ }
+ 
+ function resolveImageFallbackCandidates(params: {
+diff --git a/src/agents/pi-embedded-runner/abort.ts b/src/agents/pi-embedded-runner/abort.ts
+index 164bf1aff..8730fa981 100644
+--- a/src/agents/pi-embedded-runner/abort.ts
++++ b/src/agents/pi-embedded-runner/abort.ts
+@@ -1 +1,17 @@
+-export { isAbortError } from "../../infra/unhandled-rejections.js";
++/**
++ * Runner abort check. Catches any abort-related message for embedded runners.
++ * More permissive than the core isAbortError since runners need to catch
++ * various abort signals from different sources.
++ */
++export function isRunnerAbortError(err: unknown): boolean {
++  if (!err || typeof err !== "object") {
++    return false;
++  }
++  const name = "name" in err ? String(err.name) : "";
++  if (name === "AbortError") {
++    return true;
++  }
++  const message =
++    "message" in err && typeof err.message === "string" ? err.message.toLowerCase() : "";
++  return message.includes("aborted");
++}
+diff --git a/src/agents/pi-embedded-runner/run/attempt.ts b/src/agents/pi-embedded-runner/run/attempt.ts
+index f195150a0..086b11fae 100644
+--- a/src/agents/pi-embedded-runner/run/attempt.ts
++++ b/src/agents/pi-embedded-runner/run/attempt.ts
+@@ -60,7 +60,7 @@ import { buildSystemPromptParams } from "../../system-prompt-params.js";
+ import { buildSystemPromptReport } from "../../system-prompt-report.js";
+ import { resolveTranscriptPolicy } from "../../transcript-policy.js";
+ import { DEFAULT_BOOTSTRAP_FILENAME } from "../../workspace.js";
+-import { isAbortError } from "../abort.js";
++import { isRunnerAbortError } from "../abort.js";
+ import { appendCacheTtlTimestamp, isCacheTtlEligibleProvider } from "../cache-ttl.js";
+ import { buildEmbeddedExtensionPaths } from "../extensions.js";
+ import { applyExtraParamsToAgent } from "../extra-params.js";
+@@ -832,7 +832,7 @@ export async function runEmbeddedAttempt(
+         try {
+           await waitForCompactionRetry();
+         } catch (err) {
+-          if (isAbortError(err)) {
++          if (isRunnerAbortError(err)) {
+             if (!promptError) {
+               promptError = err;
+             }
+diff --git a/src/commands/onboard-helpers.ts b/src/commands/onboard-helpers.ts
+index ef9d969f1..086912035 100644
+--- a/src/commands/onboard-helpers.ts
++++ b/src/commands/onboard-helpers.ts
+@@ -11,7 +11,7 @@ import { CONFIG_PATH } from "../config/config.js";
+ import { resolveSessionTranscriptsDirForAgent } from "../config/sessions.js";
+ import { callGateway } from "../gateway/call.js";
+ import { normalizeControlUiBasePath } from "../gateway/control-ui-shared.js";
+-import { pickPrimaryLanIPv4 } from "../gateway/net.js";
++import { pickPrimaryLanIPv4, isValidIPv4 } from "../gateway/net.js";
+ import { isSafeExecutableValue } from "../infra/exec-safety.js";
+ import { pickPrimaryTailnetIPv4 } from "../infra/tailnet.js";
+ import { isWSL } from "../infra/wsl.js";
+@@ -464,14 +464,3 @@ export function resolveControlUiLinks(params: {
+     wsUrl: `ws://${host}:${port}${wsPath}`,
+   };
+ }
+-
+-function isValidIPv4(host: string): boolean {
+-  const parts = host.split(".");
+-  if (parts.length !== 4) {
+-    return false;
+-  }
+-  return parts.every((part) => {
+-    const n = Number.parseInt(part, 10);
+-    return !Number.isNaN(n) && n >= 0 && n <= 255 && part === String(n);
+-  });
+-}
+diff --git a/src/gateway/net.ts b/src/gateway/net.ts
+index ea4978989..13c722054 100644
+--- a/src/gateway/net.ts
++++ b/src/gateway/net.ts
+@@ -244,7 +244,7 @@ export async function resolveGatewayListenHosts(
+  * @param host - The string to validate
+  * @returns True if valid IPv4 format
+  */
+-function isValidIPv4(host: string): boolean {
++export function isValidIPv4(host: string): boolean {
+   const parts = host.split(".");
+   if (parts.length !== 4) {
+     return false;
+diff --git a/src/infra/unhandled-rejections.ts b/src/infra/unhandled-rejections.ts
+index d84c4bf7e..c2e8d935c 100644
+--- a/src/infra/unhandled-rejections.ts
++++ b/src/infra/unhandled-rejections.ts
+@@ -62,10 +62,12 @@ export function isAbortError(err: unknown): boolean {
+   if (name === "AbortError") {
+     return true;
+   }
+-  // Check for abort messages from Node's undici and other sources
+-  const message =
+-    "message" in err && typeof err.message === "string" ? err.message.toLowerCase() : "";
+-  return message.includes("aborted");
++  // Check for "This operation was aborted" message from Node's undici
++  const message = "message" in err && typeof err.message === "string" ? err.message : "";
++  if (message === "This operation was aborted") {
++    return true;
++  }
++  return false;
+ }
+ 
+ function isFatalError(err: unknown): boolean {
+diff --git a/src/infra/wsl.ts b/src/infra/wsl.ts
+index df52ab934..25820d611 100644
+--- a/src/infra/wsl.ts
++++ b/src/infra/wsl.ts
+@@ -1,3 +1,4 @@
++import { readFileSync } from "node:fs";
+ import fs from "node:fs/promises";
+ 
+ let wslCached: boolean | null = null;
+@@ -9,6 +10,40 @@ export function isWSLEnv(): boolean {
+   return false;
+ }
+ 
++/**
++ * Synchronously check if running in WSL.
++ * Checks env vars first, then /proc/version.
++ */
++export function isWSLSync(): boolean {
++  if (process.platform !== "linux") {
++    return false;
++  }
++  if (isWSLEnv()) {
++    return true;
++  }
++  try {
++    const release = readFileSync("/proc/version", "utf8").toLowerCase();
++    return release.includes("microsoft") || release.includes("wsl");
++  } catch {
++    return false;
++  }
++}
++
++/**
++ * Synchronously check if running in WSL2.
++ */
++export function isWSL2Sync(): boolean {
++  if (!isWSLSync()) {
++    return false;
++  }
++  try {
++    const version = readFileSync("/proc/version", "utf8").toLowerCase();
++    return version.includes("wsl2") || version.includes("microsoft-standard");
++  } catch {
++    return false;
++  }
++}
++
+ export async function isWSL(): Promise<boolean> {
+   if (wslCached !== null) {
+     return wslCached;
+diff --git a/src/plugin-sdk/index.ts b/src/plugin-sdk/index.ts
+index 99dd63ba3..5355d933e 100644
+--- a/src/plugin-sdk/index.ts
++++ b/src/plugin-sdk/index.ts
+@@ -136,6 +136,8 @@ export {
+   rejectDevicePairing,
+ } from "../infra/device-pairing.js";
+ export { formatErrorMessage } from "../infra/errors.js";
++export { isWSLSync, isWSL2Sync, isWSLEnv } from "../infra/wsl.js";
++export { isTruthyEnvValue } from "../infra/env.js";
+ export { resolveToolsBySender } from "../config/group-policy.js";
+ export {
+   buildPendingHistoryContextFromMap,
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,74 @@
+From 2456478c9bd9e45debf90141c81a9abf2075ad8c Mon Sep 17 00:00:00 2001
+From: programcaicai <programcaicai@programcaicaideMac-mini.local>
+Date: Tue, 10 Feb 2026 18:15:38 +0800
+Subject: [PATCH 43/44] fix: use direct ChatType for telegram native command
+ routing
+
+---
+ .../chattype-fix.md                           | 40 +++++++++++++++++++
+ src/telegram/bot-native-commands.ts           |  2 +-
+ 2 files changed, 41 insertions(+), 1 deletion(-)
+ create mode 100644 reports/ctx-safe-call-provider-tools/chattype-fix.md
+
+diff --git a/reports/ctx-safe-call-provider-tools/chattype-fix.md b/reports/ctx-safe-call-provider-tools/chattype-fix.md
+new file mode 100644
+index 000000000..9ae39b025
+--- /dev/null
++++ b/reports/ctx-safe-call-provider-tools/chattype-fix.md
+@@ -0,0 +1,40 @@
++# ChatType dm -> direct Permanent Fix Report
++
++## Scope
++
++- Repo: `/Users/programcaicai/clawd/projects/openclaw`
++- Branch: `fix/compact-content-normalize`
++- Goal: remove `"dm"` usage only where a `ChatType` value is required, keep non-ChatType legacy/feature usages intact.
++
++## What I Checked
++
++1. Located all `"dm"` occurrences in TypeScript:
++   - Command: `rg -n '"dm"' src/ -t ts`
++2. Confirmed `ChatType` canonical values:
++   - File: `src/channels/chat-type.ts`
++   - Definition: `"direct" | "group" | "channel"`
++3. Reviewed non-test source `"dm"` usages and filtered to ChatType contexts.
++
++## Fix Applied
++
++- Updated one real ChatType assignment:
++  - `src/telegram/bot-native-commands.ts`
++  - `peer.kind: isGroup ? "group" : "dm"` -> `peer.kind: isGroup ? "group" : "direct"`
++
++## Why this is the correct permanent fix
++
++- `resolveAgentRoute(...).peer.kind` is typed as `ChatType`.
++- `"dm"` is not in `ChatType`; `"direct"` is the canonical value.
++- Remaining `"dm"` occurrences are intentionally non-ChatType contexts (legacy parsing, config compatibility, inline-button scope, thread scope, tests).
++
++## Validation
++
++- Build command run:
++  - `npm run build`
++- Result: success (build + plugin-sdk d.ts generation completed).
++
++## Commit
++
++- Commit includes:
++  - `src/telegram/bot-native-commands.ts`
++  - `reports/ctx-safe-call-provider-tools/chattype-fix.md`
+diff --git a/src/telegram/bot-native-commands.ts b/src/telegram/bot-native-commands.ts
+index 7c1fcbb7a..a177db95e 100644
+--- a/src/telegram/bot-native-commands.ts
++++ b/src/telegram/bot-native-commands.ts
+@@ -625,7 +625,7 @@ export const registerTelegramNativeCommands = ({
+             channel: "telegram",
+             accountId,
+             peer: {
+-              kind: isGroup ? "group" : "dm",
++              kind: isGroup ? "group" : "direct",
+               id: isGroup ? buildTelegramGroupPeerId(chatId, resolvedThreadId) : String(chatId),
+             },
+             parentPeer,
+-- 
+2.50.1 (Apple Git-155)
+

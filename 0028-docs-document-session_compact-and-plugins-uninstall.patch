@@ -1,7 +1,7 @@
-From 0e00335a9c3b778da288a4efdc2afcf0f284f856 Mon Sep 17 00:00:00 2001
+From 86894f8b377d4a642830d9cc8c969656b223f256 Mon Sep 17 00:00:00 2001
 From: programcaicai <programcaicai@programcaicaideMac-mini.local>
 Date: Wed, 4 Feb 2026 15:26:11 +0800
-Subject: [PATCH 03/12] docs: document session_compact and plugins uninstall
+Subject: [PATCH 28/44] docs: document session_compact and plugins uninstall
 
 ---
  docs/cli/plugins.md         | 14 ++++++++++++++
