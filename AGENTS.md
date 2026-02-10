@@ -43,6 +43,26 @@
 - 安装后至少完成：补丁应用成功检查 + `npm run build` 通过。  
   (After install, verify patch apply success and passing build.)
 
+## 文件保护 / File Protection
+
+- `README.md` 只能由 agent 手动编辑，任何脚本（包括 `generate-patches.sh`）禁止覆盖或修改。  
+  (`README.md` may only be edited by an agent; no script may overwrite or modify it.)
+- `AGENTS.md`、`install.sh` 同理：脚本只能操作 `patches/` 目录。  
+  (Same for `AGENTS.md` and `install.sh`: scripts may only touch `patches/`.)
+- `generate-patches.sh` 是唯一的补丁生成入口，只清理并重建 `patches/` 目录。  
+  (`generate-patches.sh` is the sole patch generation entry point; it only clears and rebuilds `patches/`.)
+- 禁止在本仓库中包含 OpenClaw 原项目源代码。  
+  (Never include original OpenClaw source code in this repo.)
+
+## 文档规则 / Documentation Rules
+
+- 所有文档必须中英双语（中文优先）。  
+  (All docs must be bilingual, Chinese first.)
+- README.md 更新时必须同步补丁列表、功能说明、安装步骤。  
+  (When updating README.md, keep patch list, features, and install steps in sync.)
+- 禁止罗列式堆砌文件名或 patch 列表；要有结构、可读性、一眼能懂。  
+  (No raw file/patch dumps; docs must be structured and scannable.)
+
 ## 文件结构 / File Layout
 
 - `patches/*.patch`（或仓库根目录 `*.patch`）— 补丁文件  
