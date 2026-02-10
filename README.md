@@ -1,132 +1,72 @@
-# OpenClaw Patch Bundle
+# OpenClaw Personal Patches
 
-Patch set generated from branch `fix/compact-content-normalize` and maintained for direct apply.
+> 解决 OpenClaw 在长会话、多 subagent 高强度使用中的三个实际痛点：压缩太粗暴、工具输出撑爆上下文、插件装了卸不掉。
 
-## This Refresh
+## 痛点与方案
 
-- Added 4 new patches at the tail: `0041`-`0044`.
-- New coverage: provider-tool wrapping in `ctx_safe_call`, naming alignment updates, Telegram `ChatType` routing fix, and review hardening fixes.
+### 会话压缩不够精细
 
-## Installation
+原版压缩是全量摘要，经常把刚聊的内容也压掉，或者保留太多旧内容浪费窗口。
 
-### Option A: one-command script
+补丁加了 `keepHead` / `keepTail` 参数——保留开头的系统指令和最近几轮对话，只摘要中间部分。压缩改为 turn 结束后异步执行，不卡生成；503 自动重试；修了 subagent store 查找和混合内容格式的崩溃。
 
-```bash
-chmod +x install.sh
-./install.sh
+### 工具调用没有安全网
+
+一次 `read` 大文件或 `exec` 长日志就能灌入几万字符，直接吃掉上下文窗口，后续对话质量断崖下降。
+
+新增 `ctx_safe_call` 工具，包装任意工具调用做 `maxChars` 截断和分页。工具描述里内置了完整使用指南，模型不需要额外 prompt 就知道：provider tools 靠 unix 管道过滤，`fields` 只给原生 JSON 工具用。
+
+```json
+{ "tool": "ctx_safe_call",
+  "params": { "tool": "exec",
+    "params": { "command": "cat app.log | rg ERROR | tail -20" },
+    "maxChars": 2000 }}
 ```
 
-### Option B: manual apply
+### 插件卸载靠手改配置
+
+试装一个插件失败后，只能手动编辑 JSON 配置删引用、手动删文件，容易留残。
+
+补丁加了 `openclaw plugins uninstall <id>`，一条命令清理配置引用和磁盘文件。`--keep-files` 可以只清配置保留文件。
+
+## 安装
 
 ```bash
-git clone https://github.com/openclaw/openclaw.git
-cd openclaw
-git checkout 1d46ca3a95c7ff2669cc9c2a231fc460a2a3cbbb
-git am /path/to/openclaw-patch/patches/*.patch
+git clone https://github.com/ProgramCaiCai/openclaw-patch.git
+cd openclaw-patch && chmod +x install.sh && ./install.sh
+```
+
+脚本自动检测 OpenClaw 路径、校验版本、按序应用补丁。手动应用：`cd /path/to/openclaw && git am patches/*.patch && npm run build`。
+
+## 兼容性
+
+基于 OpenClaw `v2026.2.9`。共 12 个补丁，按依赖顺序编号。官方新版本发布后会 rebase 更新。
+
+---
+
+# English
+
+> Fixes three real pain points when running OpenClaw under heavy use: coarse compaction, uncontrolled tool output flooding context, and no plugin uninstall.
+
+## Problems & Solutions
+
+**Session compaction is too coarse.** Stock compaction summarizes everything or nothing. These patches add `keepHead`/`keepTail` to preserve system instructions and recent turns while summarizing only the middle. Compaction runs async after turn completion with automatic 503 retry, plus fixes for subagent store lookup and mixed-content crashes.
+
+**Tool output can blow up context.** A single `read` or `exec` can dump tens of thousands of chars into the context window. `ctx_safe_call` wraps any tool call with `maxChars` truncation and pagination. Its description includes a built-in usage guide so the model knows: use unix pipes for provider tools, `fields` only for native JSON tools.
+
+**No plugin uninstall.** `openclaw plugins uninstall <id>` cleans config references and files in one command. `--keep-files` to preserve files.
+
+## Install
+
+```bash
+git clone https://github.com/ProgramCaiCai/openclaw-patch.git
+cd openclaw-patch && chmod +x install.sh && ./install.sh
 ```
 
 ## Compatibility
 
-- OpenClaw base commit: `1d46ca3a95c7ff2669cc9c2a231fc460a2a3cbbb`
-- Patch head commit: `d78c01d47`
-- Patch count: `44`
+Based on OpenClaw `v2026.2.9`. 12 patches in dependency order. Will rebase on new releases.
 
-## Patch List (EN)
+## License
 
-- `0001-fix-normalize-message-content-before-compaction-to-p.patch` - fix: normalize message content before compaction to prevent filter crash
-- `0002-fix-address-review-feedback-on-content-normalization.patch` - fix: address review feedback on content normalization
-- `0003-Agents-scope-sanitizeUserFacingText-rewrites-to-erro.patch` - Agents: scope sanitizeUserFacingText rewrites to errorContext
-- `0004-only-check-is-check-docs-when-only-docs-changed.patch` - only check is check-docs when only docs changed
-- `0005-discord-auto-create-thread-when-sending-to-Forum-Med.patch` - discord: auto-create thread when sending to Forum/Media channels (#12380)
-- `0006-docs-fix-broken-links-checker-and-add-CI-docs-13041.patch` - docs: fix broken links checker and add CI docs (#13041)
-- `0007-fix-cap-Discord-gateway-reconnect-at-50-attempts-to-.patch` - fix: cap Discord gateway reconnect at 50 attempts to prevent infinite loop (#12230)
-- `0008-feat-add-zai-glm-4.6v-image-understanding-support-10.patch` - feat: add zai/glm-4.6v image understanding support (#10267)
-- `0009-fix-suggest-clear-in-context-overflow-error-message-.patch` - fix: suggest /clear in context overflow error message (#12973)
-- `0010-fix-docs-broken-links-and-improve-link-checker-13056.patch` - fix: docs broken links and improve link checker (#13056)
-- `0011-Deduplicate-more.patch` - Deduplicate more
-- `0012-improve-pre-commit-hook.patch` - improve pre-commit hook
-- `0013-Update-contributing-deduplicate-more-functions.patch` - Update contributing, deduplicate more functions
-- `0014-chore-deps-update-dependencies-remove-hono-pinning.patch` - chore(deps): update dependencies, remove hono pinning
-- `0015-fix-tools-correct-Grok-response-parsing-for-xAI-Resp.patch` - fix(tools): correct Grok response parsing for xAI Responses API (#13049)
-- `0016-Improve-code-analyzer-for-independent-packages-CI-on.patch` - Improve code analyzer for independent packages, CI: only run release-check on push to main
-- `0017-fix-memory-default-batch-embeddings-to-off.patch` - fix(memory): default batch embeddings to off
-- `0018-refactor-consolidate-fetchWithTimeout-into-shared-ut.patch` - refactor: consolidate fetchWithTimeout into shared utility
-- `0019-docs-add-vulnerability-reporting-guidelines-to-CONTR.patch` - docs: add vulnerability reporting guidelines to CONTRIBUTING.md
-- `0020-docs-expand-vulnerability-reporting-guidelines-in-SE.patch` - docs: expand vulnerability reporting guidelines in SECURITY.md
-- `0021-fix-unify-session-maintenance-and-cron-run-pruning-1.patch` - fix: unify session maintenance and cron run pruning (#13083)
-- `0022-Docker-include-A2UI-sources-for-bundle-13114.patch` - Docker: include A2UI sources for bundle (#13114)
-- `0023-Chore-add-testflight-auto-response.patch` - Chore: add testflight auto-response
-- `0024-fix-ui-prioritize-displayName-over-label-in-webchat-.patch` - fix(ui): prioritize displayName over label in webchat session picker (#13108)
-- `0025-fix-signal-enforce-mention-gating-for-group-messages.patch` - fix(signal): enforce mention gating for group messages (#13124)
-- `0026-feat-compaction-add-session_compact-tool.patch` - feat(compaction): add session_compact tool
-- `0027-feat-cli-add-plugins-uninstall-command.patch` - feat(cli): add plugins uninstall command
-- `0028-docs-document-session_compact-and-plugins-uninstall.patch` - docs: document session_compact and plugins uninstall
-- `0029-fix-compaction-schedule-session_compact-after-turn.patch` - fix(compaction): schedule session_compact after turn
-- `0030-fix-compaction-retry-session_compact-on-transient-50.patch` - fix(compaction): retry session_compact on transient 503
-- `0031-fix-pass-agentId-directly-to-session_compact-tool-to.patch` - fix: pass agentId directly to session_compact tool to fix store lookup for subagent sessions
-- `0032-fix-normalize-message-content-before-compaction-to-p.patch` - fix: normalize message content before compaction to prevent filter crash
-- `0033-feat-tools-add-safe_call-wrapper-for-bounded-tool-ou.patch` - feat(tools): add safe_call wrapper for bounded tool output
-- `0034-docs-openclaw-patch-add-safe_call-reports-and-README.patch` - docs(openclaw-patch): add safe_call reports and README notes
-- `0035-docs-openclaw-patch-finalize-report-files.patch` - docs(openclaw-patch): finalize report files
-- `0036-docs-openclaw-patch-update-publish-status-notes.patch` - docs(openclaw-patch): update publish status notes
-- `0037-fix-tools-harden-safe_call-based-on-code-review-feed.patch` - fix(tools): harden safe_call based on code review feedback
-- `0038-docs-reports-add-stable-release-notes-for-safe_call-.patch` - docs(reports): add stable release notes for safe_call hardening
-- `0039-docs-reports-note-fork-branch-sync-for-stable-releas.patch` - docs(reports): note fork branch sync for stable release
-- `0040-feat-session_compact-add-keepHead-keepTail-turn-wind.patch` - feat(session_compact): add keepHead/keepTail turn-window compaction
-- `0041-fix-let-ctx_safe_call-wrap-provider-read-exec-proces.patch` - fix: let ctx_safe_call wrap provider read/exec/process
-- `0042-refactor-agents-unify-ctx_safe_call-tool-naming.patch` - refactor(agents): unify ctx_safe_call tool naming
-- `0043-fix-use-direct-ChatType-for-telegram-native-command-.patch` - fix: use direct ChatType for telegram native command routing
-- `0044-fix-tools-harden-ctx_safe_call-provider-resolution-a.patch` - fix(tools): harden ctx_safe_call provider resolution and signal propagation
-
-## 补丁说明（中文）
-
-- 本次更新将补丁集扩展到 `44` 个，新增 `0041`-`0044`。
-- 新增内容包含：`ctx_safe_call` provider tools 支持、命名统一补丁、Telegram `ChatType` 路由修复、以及 review 修复。
-- 基线 commit：`1d46ca3a95c7ff2669cc9c2a231fc460a2a3cbbb`；补丁头部 commit：`d78c01d47`。
-
-## 补丁列表（中文）
-
-- `0001-fix-normalize-message-content-before-compaction-to-p.patch` - fix: normalize message content before compaction to prevent filter crash
-- `0002-fix-address-review-feedback-on-content-normalization.patch` - fix: address review feedback on content normalization
-- `0003-Agents-scope-sanitizeUserFacingText-rewrites-to-erro.patch` - Agents: scope sanitizeUserFacingText rewrites to errorContext
-- `0004-only-check-is-check-docs-when-only-docs-changed.patch` - only check is check-docs when only docs changed
-- `0005-discord-auto-create-thread-when-sending-to-Forum-Med.patch` - discord: auto-create thread when sending to Forum/Media channels (#12380)
-- `0006-docs-fix-broken-links-checker-and-add-CI-docs-13041.patch` - docs: fix broken links checker and add CI docs (#13041)
-- `0007-fix-cap-Discord-gateway-reconnect-at-50-attempts-to-.patch` - fix: cap Discord gateway reconnect at 50 attempts to prevent infinite loop (#12230)
-- `0008-feat-add-zai-glm-4.6v-image-understanding-support-10.patch` - feat: add zai/glm-4.6v image understanding support (#10267)
-- `0009-fix-suggest-clear-in-context-overflow-error-message-.patch` - fix: suggest /clear in context overflow error message (#12973)
-- `0010-fix-docs-broken-links-and-improve-link-checker-13056.patch` - fix: docs broken links and improve link checker (#13056)
-- `0011-Deduplicate-more.patch` - Deduplicate more
-- `0012-improve-pre-commit-hook.patch` - improve pre-commit hook
-- `0013-Update-contributing-deduplicate-more-functions.patch` - Update contributing, deduplicate more functions
-- `0014-chore-deps-update-dependencies-remove-hono-pinning.patch` - chore(deps): update dependencies, remove hono pinning
-- `0015-fix-tools-correct-Grok-response-parsing-for-xAI-Resp.patch` - fix(tools): correct Grok response parsing for xAI Responses API (#13049)
-- `0016-Improve-code-analyzer-for-independent-packages-CI-on.patch` - Improve code analyzer for independent packages, CI: only run release-check on push to main
-- `0017-fix-memory-default-batch-embeddings-to-off.patch` - fix(memory): default batch embeddings to off
-- `0018-refactor-consolidate-fetchWithTimeout-into-shared-ut.patch` - refactor: consolidate fetchWithTimeout into shared utility
-- `0019-docs-add-vulnerability-reporting-guidelines-to-CONTR.patch` - docs: add vulnerability reporting guidelines to CONTRIBUTING.md
-- `0020-docs-expand-vulnerability-reporting-guidelines-in-SE.patch` - docs: expand vulnerability reporting guidelines in SECURITY.md
-- `0021-fix-unify-session-maintenance-and-cron-run-pruning-1.patch` - fix: unify session maintenance and cron run pruning (#13083)
-- `0022-Docker-include-A2UI-sources-for-bundle-13114.patch` - Docker: include A2UI sources for bundle (#13114)
-- `0023-Chore-add-testflight-auto-response.patch` - Chore: add testflight auto-response
-- `0024-fix-ui-prioritize-displayName-over-label-in-webchat-.patch` - fix(ui): prioritize displayName over label in webchat session picker (#13108)
-- `0025-fix-signal-enforce-mention-gating-for-group-messages.patch` - fix(signal): enforce mention gating for group messages (#13124)
-- `0026-feat-compaction-add-session_compact-tool.patch` - feat(compaction): add session_compact tool
-- `0027-feat-cli-add-plugins-uninstall-command.patch` - feat(cli): add plugins uninstall command
-- `0028-docs-document-session_compact-and-plugins-uninstall.patch` - docs: document session_compact and plugins uninstall
-- `0029-fix-compaction-schedule-session_compact-after-turn.patch` - fix(compaction): schedule session_compact after turn
-- `0030-fix-compaction-retry-session_compact-on-transient-50.patch` - fix(compaction): retry session_compact on transient 503
-- `0031-fix-pass-agentId-directly-to-session_compact-tool-to.patch` - fix: pass agentId directly to session_compact tool to fix store lookup for subagent sessions
-- `0032-fix-normalize-message-content-before-compaction-to-p.patch` - fix: normalize message content before compaction to prevent filter crash
-- `0033-feat-tools-add-safe_call-wrapper-for-bounded-tool-ou.patch` - feat(tools): add safe_call wrapper for bounded tool output
-- `0034-docs-openclaw-patch-add-safe_call-reports-and-README.patch` - docs(openclaw-patch): add safe_call reports and README notes
-- `0035-docs-openclaw-patch-finalize-report-files.patch` - docs(openclaw-patch): finalize report files
-- `0036-docs-openclaw-patch-update-publish-status-notes.patch` - docs(openclaw-patch): update publish status notes
-- `0037-fix-tools-harden-safe_call-based-on-code-review-feed.patch` - fix(tools): harden safe_call based on code review feedback
-- `0038-docs-reports-add-stable-release-notes-for-safe_call-.patch` - docs(reports): add stable release notes for safe_call hardening
-- `0039-docs-reports-note-fork-branch-sync-for-stable-releas.patch` - docs(reports): note fork branch sync for stable release
-- `0040-feat-session_compact-add-keepHead-keepTail-turn-wind.patch` - feat(session_compact): add keepHead/keepTail turn-window compaction
-- `0041-fix-let-ctx_safe_call-wrap-provider-read-exec-proces.patch` - fix: let ctx_safe_call wrap provider read/exec/process
-- `0042-refactor-agents-unify-ctx_safe_call-tool-naming.patch` - refactor(agents): unify ctx_safe_call tool naming
-- `0043-fix-use-direct-ChatType-for-telegram-native-command-.patch` - fix: use direct ChatType for telegram native command routing
-- `0044-fix-tools-harden-ctx_safe_call-provider-resolution-a.patch` - fix(tools): harden ctx_safe_call provider resolution and signal propagation
+MIT
