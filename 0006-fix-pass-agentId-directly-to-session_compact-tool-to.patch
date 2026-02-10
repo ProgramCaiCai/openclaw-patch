@@ -1,7 +1,7 @@
 From f822d995fb3cd878e50017b2a11b2392dd054db4 Mon Sep 17 00:00:00 2001
 From: programcaicai <programcaicai@programcaicaideMac-mini.local>
 Date: Sat, 7 Feb 2026 13:13:59 +0800
-Subject: [PATCH 06/11] fix: pass agentId directly to session_compact tool to
+Subject: [PATCH 06/12] fix: pass agentId directly to session_compact tool to
  fix store lookup for subagent sessions
 
 ---

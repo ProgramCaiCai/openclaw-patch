@@ -1,7 +1,7 @@
 From 50266fd5a3bfd74ef83d4ae05ac0ab988cf10aa8 Mon Sep 17 00:00:00 2001
 From: programcaicai <programcaicai@programcaicaideMac-mini.local>
 Date: Tue, 10 Feb 2026 14:35:08 +0800
-Subject: [PATCH 09/11] fix(tools): harden safe_call based on code review
+Subject: [PATCH 09/12] fix(tools): harden safe_call based on code review
  feedback
 
 ---

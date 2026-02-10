@@ -1,7 +1,7 @@
 From 6f410ceff0792ef594ce7224b469a77ad311402a Mon Sep 17 00:00:00 2001
 From: programcaicai <programcaicai@programcaicaideMac-mini.local>
 Date: Wed, 4 Feb 2026 15:25:56 +0800
-Subject: [PATCH 01/11] feat(compaction): add session_compact tool
+Subject: [PATCH 01/12] feat(compaction): add session_compact tool
 
 ---
  src/agents/openclaw-tools.ts                 |   8 ++

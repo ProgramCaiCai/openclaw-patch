@@ -1,7 +1,7 @@
 From 5dbbf451237d2c1ac12f3438d83cc5a55bb5c16d Mon Sep 17 00:00:00 2001
 From: programcaicai <programcaicai@programcaicaideMac-mini.local>
 Date: Tue, 10 Feb 2026 15:25:28 +0800
-Subject: [PATCH 10/11] feat(tools): add filter command support to safe_call
+Subject: [PATCH 10/12] feat(tools): add filter command support to safe_call
 
 ---
  src/agents/tools/safe-call-tool.test.ts | 158 ++++++++++++++++++-

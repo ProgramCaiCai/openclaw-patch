@@ -1,7 +1,7 @@
 From 42c8c288816b24ce649d66a1f29be46d5e14e11d Mon Sep 17 00:00:00 2001
 From: programcaicai <programcaicai@programcaicaideMac-mini.local>
 Date: Wed, 4 Feb 2026 15:26:05 +0800
-Subject: [PATCH 02/11] feat(cli): add plugins uninstall command
+Subject: [PATCH 02/12] feat(cli): add plugins uninstall command
 
 ---
  src/cli/plugins-cli.ts | 109 ++++++++++++++++++++++++++++++++++++++++-

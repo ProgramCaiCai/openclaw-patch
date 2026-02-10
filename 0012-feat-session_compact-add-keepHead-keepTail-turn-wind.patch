@@ -1,0 +1,437 @@
+From ec9598c1e9b4ca4fca24c9c5ed4a88f30c642d95 Mon Sep 17 00:00:00 2001
+From: programcaicai <programcaicai@programcaicaideMac-mini.local>
+Date: Tue, 10 Feb 2026 16:46:22 +0800
+Subject: [PATCH 12/12] feat(session_compact): add keepHead/keepTail
+ turn-window compaction
+
+---
+ src/agents/compaction.test.ts            |  66 +++++++++++++
+ src/agents/compaction.ts                 |  70 ++++++++++++++
+ src/agents/pi-embedded-runner/compact.ts | 117 ++++++++++++++++++++++-
+ src/agents/tools/session-compact-tool.ts |  36 ++++++-
+ 4 files changed, 283 insertions(+), 6 deletions(-)
+
+diff --git a/src/agents/compaction.test.ts b/src/agents/compaction.test.ts
+index 88273fb4c..502ffc270 100644
+--- a/src/agents/compaction.test.ts
++++ b/src/agents/compaction.test.ts
+@@ -4,6 +4,7 @@ import {
+   estimateMessagesTokens,
+   pruneHistoryForContextShare,
+   splitMessagesByTokenShare,
++  splitMessagesByTurnWindow,
+ } from "./compaction.js";
+ 
+ function makeMessage(id: number, size: number): AgentMessage {
+@@ -14,6 +15,14 @@ function makeMessage(id: number, size: number): AgentMessage {
+   };
+ }
+ 
++function makeAssistantMessage(id: number, size: number): AgentMessage {
++  return {
++    role: "assistant",
++    content: "a".repeat(size),
++    timestamp: id,
++  };
++}
++
+ describe("splitMessagesByTokenShare", () => {
+   it("splits messages into two non-empty parts", () => {
+     const messages: AgentMessage[] = [
+@@ -45,6 +54,63 @@ describe("splitMessagesByTokenShare", () => {
+   });
+ });
+ 
++describe("splitMessagesByTurnWindow", () => {
++  it("keeps head/tail turns and isolates middle turns", () => {
++    const messages: AgentMessage[] = [
++      makeAssistantMessage(1, 10),
++      makeMessage(2, 10),
++      makeAssistantMessage(3, 10),
++      makeMessage(4, 10),
++      makeAssistantMessage(5, 10),
++      makeMessage(6, 10),
++      makeAssistantMessage(7, 10),
++      makeMessage(8, 10),
++      makeAssistantMessage(9, 10),
++    ];
++
++    const split = splitMessagesByTurnWindow(messages, 2, 1);
++    expect(split.totalTurns).toBe(5);
++    expect(split.headMessages.map((msg) => msg.timestamp)).toEqual([1, 2, 3]);
++    expect(split.middleMessages.map((msg) => msg.timestamp)).toEqual([4, 5, 6, 7]);
++    expect(split.tailMessages.map((msg) => msg.timestamp)).toEqual([8, 9]);
++    expect(split.hasMiddle).toBe(true);
++  });
++
++  it("returns no middle messages when keepHead + keepTail covers all turns", () => {
++    const messages: AgentMessage[] = [
++      makeMessage(1, 10),
++      makeAssistantMessage(2, 10),
++      makeMessage(3, 10),
++      makeAssistantMessage(4, 10),
++    ];
++
++    const split = splitMessagesByTurnWindow(messages, 1, 1);
++    expect(split.totalTurns).toBe(2);
++    expect(split.middleMessages).toEqual([]);
++    expect(split.hasMiddle).toBe(false);
++  });
++
++  it("supports zero keep values", () => {
++    const messages: AgentMessage[] = [
++      makeMessage(1, 10),
++      makeAssistantMessage(2, 10),
++      makeMessage(3, 10),
++      makeAssistantMessage(4, 10),
++    ];
++
++    const split = splitMessagesByTurnWindow(messages, 0, 0);
++    expect(split.headMessages).toEqual([]);
++    expect(split.middleMessages.map((msg) => msg.timestamp)).toEqual([1, 2, 3, 4]);
++    expect(split.tailMessages).toEqual([]);
++    expect(split.hasMiddle).toBe(true);
++  });
++
++  it("rejects negative keep values", () => {
++    expect(() => splitMessagesByTurnWindow([], -1, 0)).toThrow("keepHead must be >= 0");
++    expect(() => splitMessagesByTurnWindow([], 0, -1)).toThrow("keepTail must be >= 0");
++  });
++});
++
+ describe("pruneHistoryForContextShare", () => {
+   it("drops older chunks until the history budget is met", () => {
+     const messages: AgentMessage[] = [
+diff --git a/src/agents/compaction.ts b/src/agents/compaction.ts
+index 783d59b76..3df5c54ba 100644
+--- a/src/agents/compaction.ts
++++ b/src/agents/compaction.ts
+@@ -103,6 +103,76 @@ export function chunkMessagesByMaxTokens(
+   return chunks;
+ }
+ 
++export type TurnWindowSplit = {
++  turnStarts: number[];
++  totalTurns: number;
++  keepHead: number;
++  keepTail: number;
++  headMessages: AgentMessage[];
++  middleMessages: AgentMessage[];
++  tailMessages: AgentMessage[];
++  hasMiddle: boolean;
++};
++
++/**
++ * Split messages into turn windows: keep head turns + summarize middle + keep tail turns.
++ * A turn starts at index 0 and on each user message thereafter.
++ */
++export function splitMessagesByTurnWindow(
++  messages: AgentMessage[],
++  keepHead: number,
++  keepTail: number,
++): TurnWindowSplit {
++  if (!Number.isFinite(keepHead) || keepHead < 0) {
++    throw new Error("keepHead must be >= 0");
++  }
++  if (!Number.isFinite(keepTail) || keepTail < 0) {
++    throw new Error("keepTail must be >= 0");
++  }
++
++  if (messages.length === 0) {
++    return {
++      turnStarts: [],
++      totalTurns: 0,
++      keepHead: 0,
++      keepTail: 0,
++      headMessages: [],
++      middleMessages: [],
++      tailMessages: [],
++      hasMiddle: false,
++    };
++  }
++
++  const starts: number[] = [0];
++  for (let i = 1; i < messages.length; i++) {
++    if ((messages[i] as { role?: string }).role === "user") {
++      starts.push(i);
++    }
++  }
++
++  const totalTurns = starts.length;
++  const normalizedHead = Math.min(Math.floor(keepHead), totalTurns);
++  const normalizedTail = Math.min(Math.floor(keepTail), Math.max(0, totalTurns - normalizedHead));
++
++  const headEndIndex = starts[normalizedHead] ?? messages.length;
++  const tailTurnStart = totalTurns - normalizedTail;
++  const tailStartIndex = starts[tailTurnStart] ?? messages.length;
++
++  const middleStart = Math.max(0, Math.min(headEndIndex, messages.length));
++  const middleEnd = Math.max(middleStart, Math.min(tailStartIndex, messages.length));
++
++  return {
++    turnStarts: starts,
++    totalTurns,
++    keepHead: normalizedHead,
++    keepTail: normalizedTail,
++    headMessages: messages.slice(0, middleStart),
++    middleMessages: messages.slice(middleStart, middleEnd),
++    tailMessages: messages.slice(middleEnd),
++    hasMiddle: middleEnd > middleStart,
++  };
++}
++
+ /**
+  * Compute adaptive chunk ratio based on average message size.
+  * When messages are large, we use smaller chunks to avoid exceeding model limits.
+diff --git a/src/agents/pi-embedded-runner/compact.ts b/src/agents/pi-embedded-runner/compact.ts
+index 2a3f3849c..fc6a37445 100644
+--- a/src/agents/pi-embedded-runner/compact.ts
++++ b/src/agents/pi-embedded-runner/compact.ts
+@@ -1,3 +1,4 @@
++import type { AgentMessage } from "@mariozechner/pi-agent-core";
+ import {
+   createAgentSession,
+   estimateTokens,
+@@ -26,6 +27,12 @@ import { resolveOpenClawAgentDir } from "../agent-paths.js";
+ import { resolveSessionAgentIds } from "../agent-scope.js";
+ import { makeBootstrapWarn, resolveBootstrapContextForRun } from "../bootstrap-files.js";
+ import { listChannelSupportedActions, resolveChannelMessageToolHints } from "../channel-tools.js";
++import {
++  computeAdaptiveChunkRatio,
++  resolveContextWindowTokens,
++  splitMessagesByTurnWindow,
++  summarizeInStages,
++} from "../compaction.js";
+ import { formatUserTime, resolveUserTimeFormat, resolveUserTimezone } from "../date-time.js";
+ import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "../defaults.js";
+ import { resolveOpenClawDocsPath } from "../docs-path.js";
+@@ -74,6 +81,8 @@ import {
+ import { splitSdkTools } from "./tool-split.js";
+ import { describeUnknownError, mapThinkingLevel, resolveExecToolDefaults } from "./utils.js";
+ 
++type AppendableSessionMessage = Parameters<SessionManager["appendMessage"]>[0];
++
+ export type CompactEmbeddedPiSessionParams = {
+   sessionId: string;
+   sessionKey?: string;
+@@ -102,6 +111,8 @@ export type CompactEmbeddedPiSessionParams = {
+   reasoningLevel?: ReasoningLevel;
+   bashElevated?: ExecElevatedDefaults;
+   customInstructions?: string;
++  keepHead?: number;
++  keepTail?: number;
+   lane?: string;
+   enqueue?: typeof enqueueCommand;
+   extraSystemPrompt?: string;
+@@ -123,6 +134,24 @@ function normalizeMessageContent(messages: Array<{ content?: unknown }>): void {
+   }
+ }
+ 
++function estimateTokensForMessages(messages: AgentMessage[]): number {
++  return messages.reduce((sum, message) => sum + estimateTokens(message), 0);
++}
++
++function cloneMessage(message: AgentMessage): AgentMessage {
++  return JSON.parse(JSON.stringify(message)) as AgentMessage;
++}
++
++function createCompactionSummaryMessage(summary: string): AgentMessage {
++  return {
++    role: "user",
++    content:
++      "The conversation history before this point was compacted into the following summary:\n\n" +
++      `<summary>\n${summary}\n</summary>`,
++    timestamp: Date.now(),
++  };
++}
++
+ /**
+  * Core compaction logic without lane queueing.
+  * Use this when already inside a session/global lane to avoid deadlocks.
+@@ -452,14 +481,94 @@ export async function compactEmbeddedPiSessionDirect(
+           session.agent.replaceMessages(limited);
+         }
+         normalizeMessageContent(session.messages as Array<{ content?: unknown }>);
++
++        const hasTurnWindow = params.keepHead !== undefined || params.keepTail !== undefined;
++        if (hasTurnWindow) {
++          if (params.keepHead !== undefined && params.keepHead < 0) {
++            throw new Error("keepHead must be >= 0");
++          }
++          if (params.keepTail !== undefined && params.keepTail < 0) {
++            throw new Error("keepTail must be >= 0");
++          }
++
++          const keepHead = Math.trunc(params.keepHead ?? 0);
++          const keepTail = Math.trunc(params.keepTail ?? 0);
++          const split = splitMessagesByTurnWindow(
++            session.messages as AgentMessage[],
++            keepHead,
++            keepTail,
++          );
++
++          if (!split.hasMiddle) {
++            return {
++              ok: true,
++              compacted: false,
++              reason: "keepHead + keepTail covers all turns",
++            };
++          }
++
++          const apiKey = await authStorage.getApiKey(model.provider);
++          if (!apiKey) {
++            throw new Error(`No API key resolved for provider "${model.provider}".`);
++          }
++
++          const contextWindow = resolveContextWindowTokens(model);
++          const reserveTokens = Math.max(1024, Math.floor(contextWindow * 0.1));
++          const adaptiveChunkRatio = computeAdaptiveChunkRatio(split.middleMessages, contextWindow);
++          const maxChunkTokens = Math.max(1, Math.floor(contextWindow * adaptiveChunkRatio));
++          const middleSummary = await summarizeInStages({
++            messages: split.middleMessages,
++            model,
++            apiKey,
++            signal: AbortSignal.timeout(120_000),
++            reserveTokens,
++            maxChunkTokens,
++            contextWindow,
++            customInstructions: params.customInstructions,
++          });
++
++          const condensedMessages: AgentMessage[] = [
++            ...split.headMessages.map(cloneMessage),
++            createCompactionSummaryMessage(middleSummary),
++            ...split.tailMessages.map(cloneMessage),
++          ];
++
++          sessionManager.resetLeaf();
++          let firstKeptEntryId = "";
++          for (const message of condensedMessages) {
++            const entryId = sessionManager.appendMessage(message as AppendableSessionMessage);
++            if (!firstKeptEntryId) {
++              firstKeptEntryId = entryId;
++            }
++          }
++
++          const sessionContext = sessionManager.buildSessionContext();
++          session.agent.replaceMessages(sessionContext.messages);
++
++          let tokensAfter: number | undefined;
++          try {
++            tokensAfter = estimateTokensForMessages(session.messages as AgentMessage[]);
++          } catch {
++            tokensAfter = undefined;
++          }
++
++          return {
++            ok: true,
++            compacted: true,
++            result: {
++              summary: middleSummary,
++              firstKeptEntryId,
++              tokensBefore: estimateTokensForMessages(split.middleMessages),
++              tokensAfter,
++            },
++          };
++        }
++
+         const result = await session.compact(params.customInstructions);
+         // Estimate tokens after compaction by summing token estimates for remaining messages
+         let tokensAfter: number | undefined;
+         try {
+-          tokensAfter = 0;
+-          for (const message of session.messages) {
+-            tokensAfter += estimateTokens(message);
+-          }
++          tokensAfter = estimateTokensForMessages(session.messages as AgentMessage[]);
+           // Sanity check: tokensAfter should be less than tokensBefore
+           if (tokensAfter > result.tokensBefore) {
+             tokensAfter = undefined; // Don't trust the estimate
+diff --git a/src/agents/tools/session-compact-tool.ts b/src/agents/tools/session-compact-tool.ts
+index 2024993f4..c712883dc 100644
+--- a/src/agents/tools/session-compact-tool.ts
++++ b/src/agents/tools/session-compact-tool.ts
+@@ -12,10 +12,15 @@ import { resolveSessionFilePath } from "../../config/sessions.js";
+ import { enqueueSystemEvent } from "../../infra/system-events.js";
+ import { resolveAgentWorkspaceDir, resolveSessionAgentId } from "../agent-scope.js";
+ import { compactEmbeddedPiSession } from "../pi-embedded.js";
+-import { readStringParam } from "./common.js";
++import { readNumberParam, readStringParam } from "./common.js";
++
++const DEFAULT_KEEP_HEAD = 3;
++const DEFAULT_KEEP_TAIL = 5;
+ 
+ const SessionCompactToolSchema = Type.Object({
+   instructions: Type.Optional(Type.String({ minLength: 1 })),
++  keepHead: Type.Optional(Type.Integer({ minimum: 0, default: DEFAULT_KEEP_HEAD })),
++  keepTail: Type.Optional(Type.Integer({ minimum: 0, default: DEFAULT_KEEP_TAIL })),
+ });
+ 
+ // Prevent duplicate compaction scheduling for the same session.
+@@ -30,6 +35,8 @@ type ScheduledCompactionTask = {
+   entry: SessionEntry;
+   storePath: string;
+   instructions?: string;
++  keepHead: number;
++  keepTail: number;
+ };
+ 
+ function sleep(ms: number): Promise<void> {
+@@ -65,7 +72,17 @@ function formatErrorReason(error: unknown): string {
+ }
+ 
+ async function runScheduledCompaction(task: ScheduledCompactionTask): Promise<void> {
+-  const { agentId, cfg, entry, instructions, sessionId, sessionKey, storePath } = task;
++  const {
++    agentId,
++    cfg,
++    entry,
++    instructions,
++    keepHead,
++    keepTail,
++    sessionId,
++    sessionKey,
++    storePath,
++  } = task;
+ 
+   // Queue compaction behind the current session lane; do not run inside the active attempt.
+   const sessionFile = resolveSessionFilePath(sessionId, entry, { agentId });
+@@ -100,6 +117,8 @@ async function runScheduledCompaction(task: ScheduledCompactionTask): Promise<vo
+         defaultLevel: "off",
+       },
+       customInstructions: instructions,
++      keepHead,
++      keepTail,
+     });
+ 
+     if (result.ok && result.compacted) {
+@@ -153,6 +172,17 @@ export function createSessionCompactTool(opts?: {
+       const params = args as Record<string, unknown>;
+       const instructions = readStringParam(params, "instructions")?.trim() || undefined;
+ 
++      const parsedKeepHead = readNumberParam(params, "keepHead", { integer: true });
++      if (parsedKeepHead !== undefined && parsedKeepHead < 0) {
++        throw new Error("keepHead must be >= 0");
++      }
++      const parsedKeepTail = readNumberParam(params, "keepTail", { integer: true });
++      if (parsedKeepTail !== undefined && parsedKeepTail < 0) {
++        throw new Error("keepTail must be >= 0");
++      }
++      const keepHead = parsedKeepHead ?? DEFAULT_KEEP_HEAD;
++      const keepTail = parsedKeepTail ?? DEFAULT_KEEP_TAIL;
++
+       const sessionKey = opts?.agentSessionKey?.trim();
+       if (!sessionKey) {
+         throw new Error("session_compact requires agentSessionKey");
+@@ -197,6 +227,8 @@ export function createSessionCompactTool(opts?: {
+           entry,
+           storePath,
+           instructions,
++          keepHead,
++          keepTail,
+         };
+ 
+         void runScheduledCompaction(task)
+-- 
+2.50.1 (Apple Git-155)
+

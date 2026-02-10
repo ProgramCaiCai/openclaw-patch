@@ -1,7 +1,7 @@
 From c23ba281c800977004edf5a9eb691054d3727aca Mon Sep 17 00:00:00 2001
 From: programcaicai <programcaicai@programcaicaideMac-mini.local>
 Date: Mon, 9 Feb 2026 22:23:13 +0800
-Subject: [PATCH 07/11] fix: normalize message content before compaction to
+Subject: [PATCH 07/12] fix: normalize message content before compaction to
  prevent filter crash
 
 ---
