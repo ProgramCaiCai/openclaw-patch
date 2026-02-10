@@ -1,0 +1,62 @@
+From 0e00335a9c3b778da288a4efdc2afcf0f284f856 Mon Sep 17 00:00:00 2001
+From: programcaicai <programcaicai@programcaicaideMac-mini.local>
+Date: Wed, 4 Feb 2026 15:26:11 +0800
+Subject: [PATCH 03/11] docs: document session_compact and plugins uninstall
+
+---
+ docs/cli/plugins.md         | 14 ++++++++++++++
+ docs/concepts/compaction.md |  6 ++++++
+ 2 files changed, 20 insertions(+)
+
+diff --git a/docs/cli/plugins.md b/docs/cli/plugins.md
+index 19e56ab1c..5094d183a 100644
+--- a/docs/cli/plugins.md
++++ b/docs/cli/plugins.md
+@@ -23,6 +23,7 @@ openclaw plugins list
+ openclaw plugins info <id>
+ openclaw plugins enable <id>
+ openclaw plugins disable <id>
++openclaw plugins uninstall <id>
+ openclaw plugins doctor
+ openclaw plugins update <id>
+ openclaw plugins update --all
+@@ -51,6 +52,19 @@ Use `--link` to avoid copying a local directory (adds to `plugins.load.paths`):
+ openclaw plugins install -l ./my-plugin
+ ```
+ 
++### Uninstall
++
++```bash
++openclaw plugins uninstall <id>
++openclaw plugins uninstall <id> --keep-files
++```
++
++Removes a plugin from config (`plugins.entries`, `plugins.installs`, and any matching `plugins.load.paths`).
++
++By default it only deletes files when the install path is under `~/.openclaw/extensions/` (or `OPENCLAW_STATE_DIR/extensions/`). Linked installs (`openclaw plugins install --link ...`) are never deleted.
++
++Use `--keep-files` to preserve any plugin files on disk while removing it from config.
++
+ ### Update
+ 
+ ```bash
+diff --git a/docs/concepts/compaction.md b/docs/concepts/compaction.md
+index 54b3d30ec..70288b36c 100644
+--- a/docs/concepts/compaction.md
++++ b/docs/concepts/compaction.md
+@@ -43,6 +43,12 @@ Use `/compact` (optionally with instructions) to force a compaction pass:
+ /compact Focus on decisions and open questions
+ ```
+ 
++If the agent has access to the `session_compact` tool, it can also trigger compaction programmatically during a run:
++
++```
++session_compact({ "instructions": "Focus on decisions and open questions" })
++```
++
+ ## Context window source
+ 
+ Context window is model-specific. OpenClaw uses the model definition from the configured provider catalog to determine limits.
+-- 
+2.50.1 (Apple Git-155)
+

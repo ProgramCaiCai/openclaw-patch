@@ -1,0 +1,2226 @@
+From 50266fd5a3bfd74ef83d4ae05ac0ab988cf10aa8 Mon Sep 17 00:00:00 2001
+From: programcaicai <programcaicai@programcaicaideMac-mini.local>
+Date: Tue, 10 Feb 2026 14:35:08 +0800
+Subject: [PATCH 09/11] fix(tools): harden safe_call based on code review
+ feedback
+
+---
+ src/agents/failover-error.test.ts             |   1 +
+ src/agents/failover-error.ts                  |   2 +-
+ ...n-prefers-per-agent-subagent-model.test.ts |  99 +++++++
+ ...ded-helpers.classifyfailoverreason.test.ts |   1 +
+ src/agents/pi-embedded-helpers/errors.ts      |   5 +
+ src/agents/subagent-announce.ts               |   4 +-
+ src/agents/tools/browser-tool.ts              |  57 +++-
+ src/agents/tools/safe-call-tool.test.ts       | 171 +++++++++++-
+ src/agents/tools/safe-call-tool.ts            | 247 +++++++++++++++---
+ src/agents/tools/session-compact-tool.ts      | 228 +++++++++-------
+ src/agents/tools/sessions-spawn-tool.ts       |  95 +++++--
+ .../reply/agent-runner-execution.ts           |  11 +-
+ src/auto-reply/reply/agent-runner-memory.ts   |  13 +-
+ src/auto-reply/reply/followup-runner.test.ts  |  46 +++-
+ src/auto-reply/reply/followup-runner.ts       |  13 +-
+ src/auto-reply/reply/get-reply-run.ts         |   1 +
+ src/auto-reply/reply/queue/types.ts           |   1 +
+ src/config/sessions/types.ts                  |   1 +
+ src/gateway/protocol/schema/sessions.ts       |   1 +
+ src/gateway/sessions-patch.test.ts            |  54 ++++
+ src/gateway/sessions-patch.ts                 |  33 +++
+ src/media-understanding/apply.ts              |  15 +-
+ src/security/external-content.ts              |   9 +-
+ src/telegram/bot-message-context.ts           |  17 ++
+ src/telegram/bot-native-commands.test.ts      | 135 +++++++---
+ src/telegram/bot-native-commands.ts           | 229 +++++++++++++---
+ 26 files changed, 1230 insertions(+), 259 deletions(-)
+
+diff --git a/src/agents/failover-error.test.ts b/src/agents/failover-error.test.ts
+index d81781a90..84f85aaa4 100644
+--- a/src/agents/failover-error.test.ts
++++ b/src/agents/failover-error.test.ts
+@@ -9,6 +9,7 @@ describe("failover-error", () => {
+   it("infers failover reason from HTTP status", () => {
+     expect(resolveFailoverReasonFromError({ status: 402 })).toBe("billing");
+     expect(resolveFailoverReasonFromError({ statusCode: "429" })).toBe("rate_limit");
++    expect(resolveFailoverReasonFromError({ status: 503 })).toBe("rate_limit");
+     expect(resolveFailoverReasonFromError({ status: 403 })).toBe("auth");
+     expect(resolveFailoverReasonFromError({ status: 408 })).toBe("timeout");
+     expect(resolveFailoverReasonFromError({ status: 400 })).toBe("format");
+diff --git a/src/agents/failover-error.ts b/src/agents/failover-error.ts
+index ddef89717..7b0f065f0 100644
+--- a/src/agents/failover-error.ts
++++ b/src/agents/failover-error.ts
+@@ -151,7 +151,7 @@ export function resolveFailoverReasonFromError(err: unknown): FailoverReason | n
+   if (status === 402) {
+     return "billing";
+   }
+-  if (status === 429) {
++  if (status === 429 || status === 503) {
+     return "rate_limit";
+   }
+   if (status === 401 || status === 403) {
+diff --git a/src/agents/openclaw-tools.subagents.sessions-spawn-prefers-per-agent-subagent-model.test.ts b/src/agents/openclaw-tools.subagents.sessions-spawn-prefers-per-agent-subagent-model.test.ts
+index 5003ddbfc..ed5a29887 100644
+--- a/src/agents/openclaw-tools.subagents.sessions-spawn-prefers-per-agent-subagent-model.test.ts
++++ b/src/agents/openclaw-tools.subagents.sessions-spawn-prefers-per-agent-subagent-model.test.ts
+@@ -80,6 +80,105 @@ describe("openclaw-tools: subagents", () => {
+       model: "opencode/claude",
+     });
+   });
++  it("sessions_spawn preserves subagent fallback overrides when configured", async () => {
++    resetSubagentRegistryForTests();
++    callGatewayMock.mockReset();
++    configOverride = {
++      session: { mainKey: "main", scope: "per-sender" },
++      agents: {
++        defaults: {
++          subagents: {
++            model: {
++              primary: "openai/gpt-5.3-codex-high",
++              fallbacks: ["anthropic/claude-sonnet-4-5", "anthropic/claude-opus-4-6"],
++            },
++          },
++        },
++      },
++    };
++    const calls: Array<{ method?: string; params?: unknown }> = [];
++
++    callGatewayMock.mockImplementation(async (opts: unknown) => {
++      const request = opts as { method?: string; params?: unknown };
++      calls.push(request);
++      if (request.method === "sessions.patch") {
++        return { ok: true };
++      }
++      if (request.method === "agent") {
++        return { runId: "run-model-fallbacks", status: "accepted" };
++      }
++      return {};
++    });
++
++    const tool = createOpenClawTools({
++      agentSessionKey: "agent:main:main",
++      agentChannel: "discord",
++    }).find((candidate) => candidate.name === "sessions_spawn");
++    if (!tool) {
++      throw new Error("missing sessions_spawn tool");
++    }
++
++    const result = await tool.execute("call-agent-model-fallbacks", {
++      task: "do thing",
++    });
++    expect(result.details).toMatchObject({
++      status: "accepted",
++      modelApplied: true,
++      modelFallbacksApplied: true,
++    });
++
++    const patchCall = calls.find((call) => call.method === "sessions.patch");
++    expect(patchCall?.params).toMatchObject({
++      model: "openai/gpt-5.3-codex-high",
++      modelFallbacksOverride: ["anthropic/claude-sonnet-4-5", "anthropic/claude-opus-4-6"],
++    });
++  });
++
++  it("sessions_spawn accepts object model override with primary+fallbacks", async () => {
++    resetSubagentRegistryForTests();
++    callGatewayMock.mockReset();
++    const calls: Array<{ method?: string; params?: unknown }> = [];
++
++    callGatewayMock.mockImplementation(async (opts: unknown) => {
++      const request = opts as { method?: string; params?: unknown };
++      calls.push(request);
++      if (request.method === "sessions.patch") {
++        return { ok: true };
++      }
++      if (request.method === "agent") {
++        return { runId: "run-object-override", status: "accepted" };
++      }
++      return {};
++    });
++
++    const tool = createOpenClawTools({
++      agentSessionKey: "agent:main:main",
++      agentChannel: "discord",
++    }).find((candidate) => candidate.name === "sessions_spawn");
++    if (!tool) {
++      throw new Error("missing sessions_spawn tool");
++    }
++
++    const result = await tool.execute("call-model-object", {
++      task: "do thing",
++      model: {
++        primary: "openai/gpt-5.3-codex-high",
++        fallbacks: ["anthropic/claude-sonnet-4-5"],
++      },
++    });
++    expect(result.details).toMatchObject({
++      status: "accepted",
++      modelApplied: true,
++      modelFallbacksApplied: true,
++    });
++
++    const patchCall = calls.find((call) => call.method === "sessions.patch");
++    expect(patchCall?.params).toMatchObject({
++      model: "openai/gpt-5.3-codex-high",
++      modelFallbacksOverride: ["anthropic/claude-sonnet-4-5"],
++    });
++  });
++
+   it("sessions_spawn skips invalid model overrides and continues", async () => {
+     resetSubagentRegistryForTests();
+     callGatewayMock.mockReset();
+diff --git a/src/agents/pi-embedded-helpers.classifyfailoverreason.test.ts b/src/agents/pi-embedded-helpers.classifyfailoverreason.test.ts
+index 749a52414..c834e6328 100644
+--- a/src/agents/pi-embedded-helpers.classifyfailoverreason.test.ts
++++ b/src/agents/pi-embedded-helpers.classifyfailoverreason.test.ts
+@@ -16,6 +16,7 @@ describe("classifyFailoverReason", () => {
+     expect(classifyFailoverReason("no api key found")).toBe("auth");
+     expect(classifyFailoverReason("429 too many requests")).toBe("rate_limit");
+     expect(classifyFailoverReason("resource has been exhausted")).toBe("rate_limit");
++    expect(classifyFailoverReason("503 No available providers")).toBe("rate_limit");
+     expect(
+       classifyFailoverReason(
+         '{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
+diff --git a/src/agents/pi-embedded-helpers/errors.ts b/src/agents/pi-embedded-helpers/errors.ts
+index 829351e20..01d91f2fa 100644
+--- a/src/agents/pi-embedded-helpers/errors.ts
++++ b/src/agents/pi-embedded-helpers/errors.ts
+@@ -464,6 +464,11 @@ const ERROR_PATTERNS = {
+     "quota exceeded",
+     "resource_exhausted",
+     "usage limit",
++    "no available providers",
++    "no_available_providers",
++    "service_unavailable_error",
++    "temporarily unavailable",
++    "所有供应商暂时不可用",
+   ],
+   overloaded: [/overloaded_error|"type"\s*:\s*"overloaded_error"/i, "overloaded"],
+   timeout: ["timeout", "timed out", "deadline exceeded", "context deadline exceeded"],
+diff --git a/src/agents/subagent-announce.ts b/src/agents/subagent-announce.ts
+index f5a0444d3..d86778287 100644
+--- a/src/agents/subagent-announce.ts
++++ b/src/agents/subagent-announce.ts
+@@ -12,6 +12,7 @@ import { callGateway } from "../gateway/call.js";
+ import { formatDurationCompact } from "../infra/format-time/format-duration.ts";
+ import { normalizeMainKey } from "../routing/session-key.js";
+ import { defaultRuntime } from "../runtime.js";
++import { replaceMarkers } from "../security/external-content.js";
+ import {
+   type DeliveryContext,
+   deliveryContextFromSession,
+@@ -316,13 +317,14 @@ export function buildSubagentSystemPrompt(params: {
+     typeof params.task === "string" && params.task.trim()
+       ? params.task.replace(/\s+/g, " ").trim()
+       : "{{TASK_DESCRIPTION}}";
++  const safeTaskText = replaceMarkers(taskText);
+   const lines = [
+     "# Subagent Context",
+     "",
+     "You are a **subagent** spawned by the main agent for a specific task.",
+     "",
+     "## Your Role",
+-    `- You were created to handle: ${taskText}`,
++    `- You were created to handle: ${safeTaskText}`,
+     "- Complete this task. That's your entire purpose.",
+     "- You are NOT the main agent. Don't try to be.",
+     "",
+diff --git a/src/agents/tools/browser-tool.ts b/src/agents/tools/browser-tool.ts
+index d434d48ad..08ce0d0c2 100644
+--- a/src/agents/tools/browser-tool.ts
++++ b/src/agents/tools/browser-tool.ts
+@@ -23,6 +23,7 @@ import { resolveBrowserConfig } from "../../browser/config.js";
+ import { DEFAULT_AI_SNAPSHOT_MAX_CHARS } from "../../browser/constants.js";
+ import { loadConfig } from "../../config/config.js";
+ import { saveMediaBuffer } from "../../media/store.js";
++import { replaceMarkers, wrapExternalContent } from "../../security/external-content.js";
+ import { BrowserToolSchema } from "./browser-tool.schema.js";
+ import { type AnyAgentTool, imageResultFromFile, jsonResult, readStringParam } from "./common.js";
+ import { callGatewayTool } from "./gateway.js";
+@@ -40,6 +41,38 @@ type BrowserProxyResult = {
+ };
+ 
+ const DEFAULT_BROWSER_PROXY_TIMEOUT_MS = 20_000;
++const BROWSER_RESULT_TEXT_KEYS = new Set(["text", "snapshot", "content", "output"]);
++
++type BrowserOutputSource = "snapshot" | "console" | "evaluate" | "act";
++
++function wrapBrowserOutput(text: string, source: BrowserOutputSource): string {
++  const sanitized = replaceMarkers(text);
++  return wrapExternalContent(sanitized, {
++    source: `browser:${source}`,
++    includeWarning: true,
++  });
++}
++
++function wrapBrowserResultText<T>(result: T, source: BrowserOutputSource): T {
++  const visit = (value: unknown): unknown => {
++    if (Array.isArray(value)) {
++      return value.map((entry) => visit(entry));
++    }
++    if (!value || typeof value !== "object") {
++      return value;
++    }
++    const wrapped: Record<string, unknown> = {};
++    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
++      if (typeof entry === "string" && BROWSER_RESULT_TEXT_KEYS.has(key)) {
++        wrapped[key] = wrapBrowserOutput(entry, source);
++        continue;
++      }
++      wrapped[key] = entry && typeof entry === "object" ? visit(entry) : entry;
++    }
++    return wrapped;
++  };
++  return visit(result) as T;
++}
+ 
+ type BrowserNodeTarget = {
+   nodeId: string;
+@@ -495,20 +528,21 @@ export function createBrowserTool(opts?: {
+                 profile,
+               });
+           if (snapshot.format === "ai") {
++            const wrappedSnapshot = wrapBrowserResultText(snapshot, "snapshot");
+             if (labels && snapshot.imagePath) {
+               return await imageResultFromFile({
+                 label: "browser:snapshot",
+                 path: snapshot.imagePath,
+-                extraText: snapshot.snapshot,
+-                details: snapshot,
++                extraText: wrappedSnapshot.snapshot,
++                details: wrappedSnapshot,
+               });
+             }
+             return {
+-              content: [{ type: "text", text: snapshot.snapshot }],
+-              details: snapshot,
++              content: [{ type: "text", text: wrappedSnapshot.snapshot }],
++              details: wrappedSnapshot,
+             };
+           }
+-          return jsonResult(snapshot);
++          return jsonResult(wrapBrowserResultText(snapshot, "snapshot"));
+         }
+         case "screenshot": {
+           const targetId = readStringParam(params, "targetId");
+@@ -581,9 +615,14 @@ export function createBrowserTool(opts?: {
+                 targetId,
+               },
+             });
+-            return jsonResult(result);
++            return jsonResult(wrapBrowserResultText(result, "console"));
+           }
+-          return jsonResult(await browserConsoleMessages(baseUrl, { level, targetId, profile }));
++          return jsonResult(
++            wrapBrowserResultText(
++              await browserConsoleMessages(baseUrl, { level, targetId, profile }),
++              "console",
++            ),
++          );
+         }
+         case "pdf": {
+           const targetId = typeof params.targetId === "string" ? params.targetId.trim() : undefined;
+@@ -689,7 +728,9 @@ export function createBrowserTool(opts?: {
+               : await browserAct(baseUrl, request as Parameters<typeof browserAct>[1], {
+                   profile,
+                 });
+-            return jsonResult(result);
++            const resultSource: BrowserOutputSource =
++              request.kind === "evaluate" ? "evaluate" : "act";
++            return jsonResult(wrapBrowserResultText(result, resultSource));
+           } catch (err) {
+             const msg = String(err);
+             if (msg.includes("404:") && msg.includes("tab not found") && profile === "chrome") {
+diff --git a/src/agents/tools/safe-call-tool.test.ts b/src/agents/tools/safe-call-tool.test.ts
+index 1480dc0f6..7f99ea468 100644
+--- a/src/agents/tools/safe-call-tool.test.ts
++++ b/src/agents/tools/safe-call-tool.test.ts
+@@ -15,6 +15,24 @@ function createStubTool(payload: unknown): AnyAgentTool {
+   };
+ }
+ 
++function hasDanglingSurrogate(text: string): boolean {
++  for (let index = 0; index < text.length; index += 1) {
++    const current = text.charCodeAt(index);
++    if (current >= 0xd800 && current <= 0xdbff) {
++      const next = text.charCodeAt(index + 1);
++      if (!(next >= 0xdc00 && next <= 0xdfff)) {
++        return true;
++      }
++      index += 1;
++      continue;
++    }
++    if (current >= 0xdc00 && current <= 0xdfff) {
++      return true;
++    }
++  }
++  return false;
++}
++
+ describe("safe_call tool", () => {
+   it("applies fields and array pagination", async () => {
+     const stub = createStubTool([
+@@ -29,7 +47,7 @@ describe("safe_call tool", () => {
+     const result = await tool.execute("call-1", {
+       tool: "stub",
+       params: {},
+-      fields: ["id"],
++      fields: [" id ", "id", ""],
+       offset: 1,
+       limit: 1,
+     });
+@@ -117,4 +135,155 @@ describe("safe_call tool", () => {
+       "safe_call cannot wrap itself",
+     );
+   });
++
++  it("rejects prototype pollution field paths", async () => {
++    const stub = createStubTool([{ id: 1 }]);
++    const tool = createSafeCallTool({
++      resolveTool: (name) => (name === "stub" ? stub : undefined),
++    });
++
++    await expect(
++      tool.execute("call-6", {
++        tool: "stub",
++        params: {},
++        fields: ["__proto__.polluted"],
++      }),
++    ).rejects.toThrow("Unsafe field path segment: __proto__");
++
++    await expect(
++      tool.execute("call-7", {
++        tool: "stub",
++        params: {},
++        fields: ["constructor.prototype.polluted"],
++      }),
++    ).rejects.toThrow("Unsafe field path segment: constructor");
++
++    expect(({} as { polluted?: unknown }).polluted).toBeUndefined();
++  });
++
++  it("paginates arrays before applying field projection", async () => {
++    let projectedReads = 0;
++    const payload = Array.from({ length: 1000 }, (_, index) => {
++      const entry: Record<string, unknown> = {};
++      Object.defineProperty(entry, "id", {
++        enumerable: true,
++        get: () => {
++          projectedReads += 1;
++          return index;
++        },
++      });
++      Object.defineProperty(entry, "name", {
++        enumerable: true,
++        value: `item-${index}`,
++      });
++      return entry;
++    });
++
++    const stub: AnyAgentTool = {
++      label: "Stub",
++      name: "stub",
++      description: "stub tool",
++      parameters: {},
++      execute: async () => ({
++        content: [{ type: "text", text: "large array" }],
++        details: payload,
++      }),
++    };
++    const tool = createSafeCallTool({
++      resolveTool: (name) => (name === "stub" ? stub : undefined),
++    });
++
++    const result = await tool.execute("call-8", {
++      tool: "stub",
++      params: {},
++      fields: ["id"],
++      offset: 10,
++      limit: 2,
++    });
++
++    const details = result.details as {
++      totalItems: number;
++      output: string;
++    };
++
++    expect(details.totalItems).toBe(1000);
++    expect(projectedReads).toBe(2);
++    expect(details.output).toContain('"id": 10');
++    expect(details.output).toContain('"id": 11');
++  });
++
++  it("falls back to content when details is null", async () => {
++    const stub: AnyAgentTool = {
++      label: "Stub",
++      name: "stub",
++      description: "stub tool",
++      parameters: {},
++      execute: async () => ({
++        content: [{ type: "text", text: "line-1\nline-2" }],
++        details: null,
++      }),
++    };
++
++    const tool = createSafeCallTool({
++      resolveTool: (name) => (name === "stub" ? stub : undefined),
++    });
++
++    const result = await tool.execute("call-9", {
++      tool: "stub",
++      params: {},
++      offset: 0,
++      limit: 1,
++    });
++
++    const details = result.details as {
++      totalItems: number;
++      output: string;
++    };
++
++    expect(details.totalItems).toBe(2);
++    expect(details.output).toContain("line-1");
++    expect(details.output).not.toContain("null");
++  });
++
++  it("handles very small maxChars", async () => {
++    const stub = createStubTool("abcdef");
++    const tool = createSafeCallTool({
++      resolveTool: (name) => (name === "stub" ? stub : undefined),
++    });
++
++    const result = await tool.execute("call-10", {
++      tool: "stub",
++      params: {},
++      maxChars: 1,
++    });
++
++    const details = result.details as {
++      truncated: boolean;
++      output: string;
++    };
++
++    expect(details.truncated).toBe(true);
++    expect(details.output.length).toBeLessThanOrEqual(1);
++  });
++
++  it("does not emit dangling surrogates after truncation", async () => {
++    const stub = createStubTool(`START-${"😀".repeat(80)}-END`);
++    const tool = createSafeCallTool({
++      resolveTool: (name) => (name === "stub" ? stub : undefined),
++    });
++
++    const result = await tool.execute("call-11", {
++      tool: "stub",
++      params: {},
++      maxChars: 60,
++    });
++
++    const details = result.details as {
++      truncated: boolean;
++      output: string;
++    };
++
++    expect(details.truncated).toBe(true);
++    expect(hasDanglingSurrogate(details.output)).toBe(false);
++  });
+ });
+diff --git a/src/agents/tools/safe-call-tool.ts b/src/agents/tools/safe-call-tool.ts
+index 07721fecb..6d69090d7 100644
+--- a/src/agents/tools/safe-call-tool.ts
++++ b/src/agents/tools/safe-call-tool.ts
+@@ -10,6 +10,12 @@ import {
+ 
+ const DEFAULT_MAX_CHARS = 2000;
+ const TRUNCATION_HINT = "提示: 用 offset 翻页查看更多";
++const BLOCKED_FIELD_SEGMENTS = new Set(["__proto__", "constructor", "prototype"]);
++
++type SafeCallPolicy = {
++  allowWrapping?: boolean;
++  allowedParams?: Set<string>;
++};
+ 
+ const SafeCallToolSchema = Type.Object({
+   tool: Type.String(),
+@@ -36,10 +42,55 @@ function isRecord(value: unknown): value is Record<string, unknown> {
+   return value !== null && typeof value === "object" && !Array.isArray(value);
+ }
+ 
++function createNullProtoRecord(): Record<string, unknown> {
++  return Object.create(null) as Record<string, unknown>;
++}
++
++function parseFieldPath(field: string): string[] {
++  const path = field
++    .split(".")
++    .map((segment) => segment.trim())
++    .filter(Boolean);
++  if (path.length === 0) {
++    return [];
++  }
++  const blockedSegment = path.find((segment) => BLOCKED_FIELD_SEGMENTS.has(segment));
++  if (blockedSegment) {
++    throw new Error(`Unsafe field path segment: ${blockedSegment}`);
++  }
++  return path;
++}
++
++function normalizeFields(fields: string[] | undefined): { names: string[]; paths: string[][] } {
++  if (!fields || fields.length === 0) {
++    return { names: [], paths: [] };
++  }
++
++  const names: string[] = [];
++  const paths: string[][] = [];
++  const seen = new Set<string>();
++
++  for (const field of fields) {
++    const path = parseFieldPath(field);
++    if (path.length === 0) {
++      continue;
++    }
++    const normalized = path.join(".");
++    if (seen.has(normalized)) {
++      continue;
++    }
++    seen.add(normalized);
++    names.push(normalized);
++    paths.push(path);
++  }
++
++  return { names, paths };
++}
++
+ function getPathValue(source: unknown, path: string[]): unknown {
+   let current: unknown = source;
+   for (const segment of path) {
+-    if (!isRecord(current) || !(segment in current)) {
++    if (!isRecord(current) || !Object.hasOwn(current, segment)) {
+       return undefined;
+     }
+     current = current[segment];
+@@ -51,7 +102,7 @@ function setPathValue(target: Record<string, unknown>, path: string[], value: un
+   let current: Record<string, unknown> = target;
+   for (let index = 0; index < path.length; index += 1) {
+     const key = path[index];
+-    if (!key) {
++    if (!key || BLOCKED_FIELD_SEGMENTS.has(key)) {
+       return;
+     }
+     const isLeaf = index === path.length - 1;
+@@ -59,24 +110,21 @@ function setPathValue(target: Record<string, unknown>, path: string[], value: un
+       current[key] = value;
+       return;
+     }
++
+     const existing = current[key];
+     if (!isRecord(existing)) {
+-      current[key] = {};
++      const nextRecord = createNullProtoRecord();
++      current[key] = nextRecord;
++      current = nextRecord;
++      continue;
+     }
+-    current = current[key] as Record<string, unknown>;
++    current = existing;
+   }
+ }
+ 
+-function pickFieldsFromRecord(value: Record<string, unknown>, fields: string[]) {
+-  const picked: Record<string, unknown> = {};
+-  for (const field of fields) {
+-    const path = field
+-      .split(".")
+-      .map((segment) => segment.trim())
+-      .filter(Boolean);
+-    if (path.length === 0) {
+-      continue;
+-    }
++function pickFieldsFromRecord(value: Record<string, unknown>, fieldPaths: string[][]) {
++  const picked = createNullProtoRecord();
++  for (const path of fieldPaths) {
+     const selected = getPathValue(value, path);
+     if (selected === undefined) {
+       continue;
+@@ -86,25 +134,23 @@ function pickFieldsFromRecord(value: Record<string, unknown>, fields: string[])
+   return picked;
+ }
+ 
+-function applyFields(value: unknown, fields: string[] | undefined): unknown {
+-  if (!fields || fields.length === 0) {
+-    return value;
+-  }
+-  const normalized = Array.from(new Set(fields.map((field) => field.trim()).filter(Boolean)));
+-  if (normalized.length === 0) {
++function applyFieldsToValue(value: unknown, fieldPaths: string[][]): unknown {
++  if (fieldPaths.length === 0) {
+     return value;
+   }
+-  if (Array.isArray(value)) {
+-    return value.map((entry) =>
+-      isRecord(entry) ? pickFieldsFromRecord(entry, normalized) : entry,
+-    );
+-  }
+   if (isRecord(value)) {
+-    return pickFieldsFromRecord(value, normalized);
++    return pickFieldsFromRecord(value, fieldPaths);
+   }
+   return value;
+ }
+ 
++function applyFieldsToArrayWindow(items: unknown[], fieldPaths: string[][]): unknown[] {
++  if (fieldPaths.length === 0) {
++    return items;
++  }
++  return items.map((entry) => (isRecord(entry) ? pickFieldsFromRecord(entry, fieldPaths) : entry));
++}
++
+ function paginateArray(items: unknown[], offset: number, limit?: number): PageResult {
+   const totalItems = items.length;
+   const end = typeof limit === "number" ? offset + limit : totalItems;
+@@ -119,18 +165,53 @@ function paginateArray(items: unknown[], offset: number, limit?: number): PageRe
+   };
+ }
+ 
++function lineBreakLength(raw: string, index: number): number {
++  const code = raw.charCodeAt(index);
++  if (code === 0x0d) {
++    return raw.charCodeAt(index + 1) === 0x0a ? 2 : 1;
++  }
++  if (code === 0x0a) {
++    return 1;
++  }
++  return 0;
++}
++
+ function paginateLines(raw: string, offset: number, limit?: number): PageResult {
+-  const lines = raw.split(/\r?\n/);
+-  const totalItems = lines.length;
+-  const end = typeof limit === "number" ? offset + limit : totalItems;
+-  const sliced = lines.slice(offset, end).join("\n");
+-  const hasMore = end < totalItems;
++  const end = typeof limit === "number" ? offset + limit : Number.POSITIVE_INFINITY;
++  const pageLines: string[] = [];
++
++  let totalItems = 0;
++  let lineStart = 0;
++
++  for (let index = 0; index <= raw.length; ) {
++    const atEnd = index === raw.length;
++    const breakLen = atEnd ? 0 : lineBreakLength(raw, index);
++    if (!atEnd && breakLen === 0) {
++      index += 1;
++      continue;
++    }
++
++    if (totalItems >= offset && totalItems < end) {
++      pageLines.push(raw.slice(lineStart, index));
++    }
++    totalItems += 1;
++
++    if (atEnd) {
++      break;
++    }
++
++    index += breakLen;
++    lineStart = index;
++  }
++
++  const boundedEnd = Number.isFinite(end) ? end : totalItems;
++  const hasMore = boundedEnd < totalItems;
+   return {
+     mode: "lines",
+     totalItems,
+     hasMore,
+-    nextOffset: hasMore ? end : undefined,
+-    output: sliced,
++    nextOffset: hasMore ? boundedEnd : undefined,
++    output: pageLines.join("\n"),
+   };
+ }
+ 
+@@ -145,6 +226,29 @@ function serializeOutput(value: unknown): string {
+   }
+ }
+ 
++function isHighSurrogate(codePoint: number): boolean {
++  return codePoint >= 0xd800 && codePoint <= 0xdbff;
++}
++
++function isLowSurrogate(codePoint: number): boolean {
++  return codePoint >= 0xdc00 && codePoint <= 0xdfff;
++}
++
++function sliceTailUtf16Safe(text: string, maxChars: number): string {
++  if (maxChars <= 0) {
++    return "";
++  }
++  let start = Math.max(0, text.length - maxChars);
++  if (start > 0 && start < text.length) {
++    const previous = text.charCodeAt(start - 1);
++    const current = text.charCodeAt(start);
++    if (isHighSurrogate(previous) && isLowSurrogate(current)) {
++      start += 1;
++    }
++  }
++  return text.slice(start);
++}
++
+ function truncateWithHeadTail(
+   text: string,
+   maxChars: number,
+@@ -166,7 +270,7 @@ function truncateWithHeadTail(
+ 
+   const edge = Math.max(1, Math.floor((maxChars - divider.length) / 2));
+   const head = truncateUtf16Safe(text, edge);
+-  const tail = truncateUtf16Safe(text.slice(Math.max(0, text.length - edge)), edge);
++  const tail = truncateUtf16Safe(sliceTailUtf16Safe(text, edge), edge);
+   let output = `${head}${divider}${tail}`;
+   if (output.length > maxChars) {
+     output = truncateUtf16Safe(output, maxChars);
+@@ -178,7 +282,7 @@ function extractPayload(result: unknown): unknown {
+   if (!isRecord(result)) {
+     return result;
+   }
+-  if ("details" in result && result.details !== undefined) {
++  if ("details" in result && result.details != null) {
+     return result.details;
+   }
+ 
+@@ -195,6 +299,45 @@ function extractPayload(result: unknown): unknown {
+   return result;
+ }
+ 
++function readSafeCallPolicy(tool: AnyAgentTool): SafeCallPolicy {
++  const toolRecord = tool as unknown as Record<string, unknown>;
++  const policyRaw = toolRecord.safeCall;
++  if (!isRecord(policyRaw)) {
++    return {};
++  }
++
++  const allowWrapping =
++    typeof policyRaw.allowWrapping === "boolean" ? policyRaw.allowWrapping : undefined;
++
++  const allowedParamsRaw = policyRaw.allowedParams;
++  const allowedParams = Array.isArray(allowedParamsRaw)
++    ? new Set(
++        allowedParamsRaw
++          .filter((value): value is string => typeof value === "string")
++          .map((value) => value.trim())
++          .filter(Boolean),
++      )
++    : undefined;
++
++  return { allowWrapping, allowedParams };
++}
++
++function selectTargetParams(
++  params: Record<string, unknown>,
++  allowedParams: Set<string> | undefined,
++): Record<string, unknown> {
++  if (!allowedParams || allowedParams.size === 0) {
++    return params;
++  }
++  const selected = createNullProtoRecord();
++  for (const key of allowedParams) {
++    if (Object.hasOwn(params, key)) {
++      selected[key] = params[key];
++    }
++  }
++  return selected;
++}
++
+ export function createSafeCallTool(options: SafeCallToolOptions): AnyAgentTool {
+   return {
+     label: "Safe Call",
+@@ -214,12 +357,22 @@ export function createSafeCallTool(options: SafeCallToolOptions): AnyAgentTool {
+         throw new Error(`Unknown tool: ${toolName}`);
+       }
+ 
++      const policy = readSafeCallPolicy(target);
++      if (policy.allowWrapping === false) {
++        throw new Error(`Tool does not allow safe_call wrapping: ${toolName}`);
++      }
++
+       const targetParamsRaw = params.params;
+-      const targetParams = isRecord(targetParamsRaw) ? targetParamsRaw : {};
++      const targetParamsSource = isRecord(targetParamsRaw) ? targetParamsRaw : {};
++      // Security boundary: safe_call forwards tool-specific params by default; target tools may
++      // opt into stricter wrapping via `safeCall.allowWrapping` and `safeCall.allowedParams`.
++      const targetParams = selectTargetParams(targetParamsSource, policy.allowedParams);
++
+       const requestedOffset = readNumberParam(params, "offset", { integer: true }) ?? 0;
+       const requestedLimit = readNumberParam(params, "limit", { integer: true });
+       const requestedMaxChars = readNumberParam(params, "maxChars", { integer: true });
+-      const fields = readStringArrayParam(params, "fields");
++      const requestedFields = readStringArrayParam(params, "fields");
++      const normalizedFields = normalizeFields(requestedFields);
+ 
+       const offset = Math.max(0, requestedOffset);
+       const limit =
+@@ -235,10 +388,20 @@ export function createSafeCallTool(options: SafeCallToolOptions): AnyAgentTool {
+         `${toolCallId}:safe_call:${toolName}`,
+         targetParams,
+       );
+-      const selected = applyFields(extractPayload(targetResult), fields);
+-      const page = Array.isArray(selected)
+-        ? paginateArray(selected, offset, limit)
+-        : paginateLines(serializeOutput(selected), offset, limit);
++      const payload = extractPayload(targetResult);
++
++      let page: PageResult;
++      if (Array.isArray(payload)) {
++        const paged = paginateArray(payload, offset, limit);
++        page = {
++          ...paged,
++          output: applyFieldsToArrayWindow(paged.output as unknown[], normalizedFields.paths),
++        };
++      } else {
++        const selected = applyFieldsToValue(payload, normalizedFields.paths);
++        page = paginateLines(serializeOutput(selected), offset, limit);
++      }
++
+       const serialized = serializeOutput(page.output);
+       const truncated = truncateWithHeadTail(serialized, maxChars);
+ 
+@@ -251,7 +414,7 @@ export function createSafeCallTool(options: SafeCallToolOptions): AnyAgentTool {
+         offset,
+         limit: limit ?? null,
+         maxChars,
+-        fields: fields ?? [],
++        fields: normalizedFields.names,
+         truncated: truncated.truncated,
+         output: truncated.output,
+       });
+diff --git a/src/agents/tools/session-compact-tool.ts b/src/agents/tools/session-compact-tool.ts
+index 161a8b2d9..2024993f4 100644
+--- a/src/agents/tools/session-compact-tool.ts
++++ b/src/agents/tools/session-compact-tool.ts
+@@ -20,6 +20,122 @@ const SessionCompactToolSchema = Type.Object({
+ 
+ // Prevent duplicate compaction scheduling for the same session.
+ const SCHEDULED_COMPACTIONS = new Set<string>();
++const RETRY_DELAYS_MS = [0, 60_000, 180_000];
++
++type ScheduledCompactionTask = {
++  sessionId: string;
++  sessionKey: string;
++  agentId: string;
++  cfg: OpenClawConfig;
++  entry: SessionEntry;
++  storePath: string;
++  instructions?: string;
++};
++
++function sleep(ms: number): Promise<void> {
++  return new Promise((resolve) => setTimeout(resolve, ms));
++}
++
++function isTransientCompactionReason(reason: string): boolean {
++  const normalized = reason.toLowerCase();
++  return (
++    // Common transient transport/provider failures.
++    normalized.includes("503") ||
++    normalized.includes("temporarily unavailable") ||
++    normalized.includes("fetch failed") ||
++    normalized.includes("econnreset") ||
++    normalized.includes("etimedout") ||
++    // CN provider/router message seen in the wild.
++    reason.includes("所有供应商暂时不可用")
++  );
++}
++
++function formatErrorReason(error: unknown): string {
++  if (error instanceof Error) {
++    return error.message;
++  }
++  if (typeof error === "string") {
++    return error;
++  }
++  try {
++    return JSON.stringify(error);
++  } catch {
++    return String(error);
++  }
++}
++
++async function runScheduledCompaction(task: ScheduledCompactionTask): Promise<void> {
++  const { agentId, cfg, entry, instructions, sessionId, sessionKey, storePath } = task;
++
++  // Queue compaction behind the current session lane; do not run inside the active attempt.
++  const sessionFile = resolveSessionFilePath(sessionId, entry, { agentId });
++  const workspaceDir = resolveAgentWorkspaceDir(cfg, agentId);
++
++  for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt += 1) {
++    const delayMs = RETRY_DELAYS_MS[attempt];
++    if (delayMs > 0) {
++      enqueueSystemEvent(`Session compaction retry scheduled in ${Math.round(delayMs / 1000)}s.`, {
++        sessionKey,
++      });
++      await sleep(delayMs);
++    }
++
++    const result = await compactEmbeddedPiSession({
++      sessionId,
++      sessionKey,
++      messageChannel: entry.lastChannel ?? entry.channel,
++      groupId: entry.groupId,
++      groupChannel: entry.groupChannel,
++      groupSpace: entry.space,
++      spawnedBy: entry.spawnedBy,
++      sessionFile,
++      workspaceDir,
++      config: cfg,
++      skillsSnapshot: entry.skillsSnapshot,
++      provider: entry.providerOverride ?? entry.modelProvider,
++      model: entry.modelOverride ?? entry.model,
++      bashElevated: {
++        enabled: false,
++        allowed: false,
++        defaultLevel: "off",
++      },
++      customInstructions: instructions,
++    });
++
++    if (result.ok && result.compacted) {
++      // Best-effort: bump compactionCount for UI/status; ignore failures.
++      try {
++        await updateSessionStore(storePath, (next) => {
++          const currentEntry = next[sessionKey];
++          const nextCount = (currentEntry?.compactionCount ?? 0) + 1;
++          const updates: Partial<SessionEntry> = {
++            compactionCount: nextCount,
++            updatedAt: Date.now(),
++          };
++          if (result.result?.tokensAfter && result.result.tokensAfter > 0) {
++            updates.totalTokens = result.result.tokensAfter;
++            updates.inputTokens = undefined;
++            updates.outputTokens = undefined;
++          }
++          next[sessionKey] = { ...currentEntry, ...updates };
++        });
++      } catch {
++        // Ignore store update failures.
++      }
++
++      enqueueSystemEvent("Session compacted.", { sessionKey });
++      return;
++    }
++
++    const reason = result.reason?.trim() || (result.ok ? "not compacted" : "error");
++    if (!result.ok && isTransientCompactionReason(reason) && attempt < RETRY_DELAYS_MS.length - 1) {
++      continue;
++    }
++
++    enqueueSystemEvent(`Session compaction did not run: ${reason}.`, { sessionKey });
++    return;
++  }
++}
+ 
+ export function createSessionCompactTool(opts?: {
+   agentSessionKey?: string;
+@@ -73,103 +189,25 @@ export function createSessionCompactTool(opts?: {
+ 
+       if (!SCHEDULED_COMPACTIONS.has(sessionId)) {
+         SCHEDULED_COMPACTIONS.add(sessionId);
+-        void (async () => {
+-          const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+-          const isTransient = (reason: string) => {
+-            const r = reason.toLowerCase();
+-            return (
+-              // Common transient transport/provider failures.
+-              r.includes("503") ||
+-              r.includes("temporarily unavailable") ||
+-              r.includes("fetch failed") ||
+-              r.includes("econnreset") ||
+-              r.includes("etimedout") ||
+-              // CN provider/router message seen in the wild.
+-              reason.includes("所有供应商暂时不可用")
+-            );
+-          };
++        const task: ScheduledCompactionTask = {
++          sessionId,
++          sessionKey,
++          agentId,
++          cfg,
++          entry,
++          storePath,
++          instructions,
++        };
+ 
+-          // Queue compaction behind the current session lane; do not run inside the active attempt.
+-          const sessionFile = resolveSessionFilePath(sessionId, entry, { agentId });
+-          const workspaceDir = resolveAgentWorkspaceDir(cfg, agentId);
+-
+-          // Retry a few times on transient 503/network failures.
+-          const retryDelaysMs = [0, 60_000, 180_000];
+-
+-          try {
+-            for (let attempt = 0; attempt < retryDelaysMs.length; attempt++) {
+-              const delayMs = retryDelaysMs[attempt];
+-              if (delayMs > 0) {
+-                enqueueSystemEvent(
+-                  `Session compaction retry scheduled in ${Math.round(delayMs / 1000)}s.`,
+-                  { sessionKey },
+-                );
+-                await sleep(delayMs);
+-              }
+-
+-              const result = await compactEmbeddedPiSession({
+-                sessionId,
+-                sessionKey,
+-                messageChannel: entry.lastChannel ?? entry.channel,
+-                groupId: entry.groupId,
+-                groupChannel: entry.groupChannel,
+-                groupSpace: entry.space,
+-                spawnedBy: entry.spawnedBy,
+-                sessionFile,
+-                workspaceDir,
+-                config: cfg,
+-                skillsSnapshot: entry.skillsSnapshot,
+-                provider: entry.providerOverride ?? entry.modelProvider,
+-                model: entry.modelOverride ?? entry.model,
+-                bashElevated: {
+-                  enabled: false,
+-                  allowed: false,
+-                  defaultLevel: "off",
+-                },
+-                customInstructions: instructions,
+-              });
+-
+-              if (result.ok && result.compacted) {
+-                // Best-effort: bump compactionCount for UI/status; ignore failures.
+-                try {
+-                  await updateSessionStore(storePath, (next) => {
+-                    const currentEntry = next[sessionKey];
+-                    const nextCount = (currentEntry?.compactionCount ?? 0) + 1;
+-                    const updates: Partial<SessionEntry> = {
+-                      compactionCount: nextCount,
+-                      updatedAt: Date.now(),
+-                    };
+-                    if (result.result?.tokensAfter && result.result.tokensAfter > 0) {
+-                      updates.totalTokens = result.result.tokensAfter;
+-                      updates.inputTokens = undefined;
+-                      updates.outputTokens = undefined;
+-                    }
+-                    next[sessionKey] = { ...currentEntry, ...updates };
+-                  });
+-                } catch {
+-                  // Ignore store update failures.
+-                }
+-
+-                enqueueSystemEvent("Session compacted.", { sessionKey });
+-                return;
+-              }
+-
+-              const reason = result.reason?.trim() || (result.ok ? "not compacted" : "error");
+-              if (!result.ok && isTransient(reason) && attempt < retryDelaysMs.length - 1) {
+-                // Try again after backoff.
+-                continue;
+-              }
+-
+-              enqueueSystemEvent(`Session compaction did not run: ${reason}.`, { sessionKey });
+-              return;
+-            }
+-          } catch (err) {
+-            const reason = err instanceof Error ? err.message : String(err);
+-            enqueueSystemEvent(`Session compaction failed: ${reason}`, { sessionKey });
+-          } finally {
++        void runScheduledCompaction(task)
++          .catch((error) => {
++            enqueueSystemEvent(`Session compaction failed: ${formatErrorReason(error)}`, {
++              sessionKey,
++            });
++          })
++          .finally(() => {
+             SCHEDULED_COMPACTIONS.delete(sessionId);
+-          }
+-        })();
++          });
+       }
+ 
+       return {
+diff --git a/src/agents/tools/sessions-spawn-tool.ts b/src/agents/tools/sessions-spawn-tool.ts
+index 1ed7bcd1c..eef7f42b9 100644
+--- a/src/agents/tools/sessions-spawn-tool.ts
++++ b/src/agents/tools/sessions-spawn-tool.ts
+@@ -10,6 +10,7 @@ import {
+   normalizeAgentId,
+   parseAgentSessionKey,
+ } from "../../routing/session-key.js";
++import { detectSuspiciousPatterns, wrapExternalContent } from "../../security/external-content.js";
+ import { normalizeDeliveryContext } from "../../utils/delivery-context.js";
+ import { resolveAgentConfig } from "../agent-scope.js";
+ import { AGENT_LANE_SUBAGENT } from "../lanes.js";
+@@ -27,7 +28,15 @@ const SessionsSpawnToolSchema = Type.Object({
+   task: Type.String(),
+   label: Type.Optional(Type.String()),
+   agentId: Type.Optional(Type.String()),
+-  model: Type.Optional(Type.String()),
++  model: Type.Optional(
++    Type.Union([
++      Type.String(),
++      Type.Object({
++        primary: Type.Optional(Type.String()),
++        fallbacks: Type.Optional(Type.Array(Type.String())),
++      }),
++    ]),
++  ),
+   thinking: Type.Optional(Type.String()),
+   runTimeoutSeconds: Type.Optional(Type.Number({ minimum: 0 })),
+   // Back-compat alias. Prefer runTimeoutSeconds.
+@@ -50,19 +59,30 @@ function splitModelRef(ref?: string) {
+   return { provider: undefined, model: trimmed };
+ }
+ 
+-function normalizeModelSelection(value: unknown): string | undefined {
++function normalizeModelSelection(value: unknown): {
++  primary?: string;
++  fallbacks?: string[];
++  hasFallbacksOverride: boolean;
++} {
+   if (typeof value === "string") {
+     const trimmed = value.trim();
+-    return trimmed || undefined;
++    return { primary: trimmed || undefined, hasFallbacksOverride: false };
+   }
+   if (!value || typeof value !== "object") {
+-    return undefined;
++    return { hasFallbacksOverride: false };
+   }
+-  const primary = (value as { primary?: unknown }).primary;
+-  if (typeof primary === "string" && primary.trim()) {
+-    return primary.trim();
+-  }
+-  return undefined;
++
++  const raw = value as { primary?: unknown; fallbacks?: unknown };
++  const primary =
++    typeof raw.primary === "string" && raw.primary.trim() ? raw.primary.trim() : undefined;
++  const hasFallbacksOverride = Array.isArray(raw.fallbacks);
++  const fallbacks = hasFallbacksOverride
++    ? (raw.fallbacks as unknown[])
++        .filter((entry): entry is string => typeof entry === "string")
++        .map((entry: string) => entry.trim())
++        .filter(Boolean)
++    : undefined;
++  return { primary, fallbacks, hasFallbacksOverride };
+ }
+ 
+ export function createSessionsSpawnTool(opts?: {
+@@ -87,9 +107,17 @@ export function createSessionsSpawnTool(opts?: {
+     execute: async (_toolCallId, args) => {
+       const params = args as Record<string, unknown>;
+       const task = readStringParam(params, "task", { required: true });
++      const suspiciousHits = detectSuspiciousPatterns(task);
++      const sanitizedTask =
++        suspiciousHits.length > 0
++          ? wrapExternalContent(task, {
++              source: "subagent:task",
++              includeWarning: true,
++            })
++          : task;
+       const label = typeof params.label === "string" ? params.label.trim() : "";
+       const requestedAgentId = readStringParam(params, "agentId");
+-      const modelOverride = readStringParam(params, "model");
++      const modelOverride = params.model;
+       const thinkingOverrideRaw = readStringParam(params, "thinking");
+       const cleanup =
+         params.cleanup === "keep" || params.cleanup === "delete" ? params.cleanup : "keep";
+@@ -115,6 +143,7 @@ export function createSessionsSpawnTool(opts?: {
+       })();
+       let modelWarning: string | undefined;
+       let modelApplied = false;
++      let modelFallbacksApplied = false;
+ 
+       const cfg = loadConfig();
+       const { mainKey, alias } = resolveMainSessionAlias(cfg);
+@@ -168,10 +197,26 @@ export function createSessionsSpawnTool(opts?: {
+       const childSessionKey = `agent:${targetAgentId}:subagent:${crypto.randomUUID()}`;
+       const spawnedByKey = requesterInternalKey;
+       const targetAgentConfig = resolveAgentConfig(cfg, targetAgentId);
+-      const resolvedModel =
+-        normalizeModelSelection(modelOverride) ??
+-        normalizeModelSelection(targetAgentConfig?.subagents?.model) ??
+-        normalizeModelSelection(cfg.agents?.defaults?.subagents?.model);
++      const modelSelections = [
++        normalizeModelSelection(modelOverride),
++        normalizeModelSelection(targetAgentConfig?.subagents?.model),
++        normalizeModelSelection(cfg.agents?.defaults?.subagents?.model),
++      ];
++      let resolvedModel: string | undefined;
++      let resolvedModelFallbacksOverride: string[] | undefined;
++      let hasModelFallbacksOverride = false;
++      for (const selection of modelSelections) {
++        if (!resolvedModel && selection.primary) {
++          resolvedModel = selection.primary;
++        }
++        if (!hasModelFallbacksOverride && selection.hasFallbacksOverride) {
++          hasModelFallbacksOverride = true;
++          resolvedModelFallbacksOverride = selection.fallbacks ?? [];
++        }
++        if (resolvedModel && hasModelFallbacksOverride) {
++          break;
++        }
++      }
+ 
+       const resolvedThinkingDefaultRaw =
+         readStringParam(targetAgentConfig?.subagents ?? {}, "thinking") ??
+@@ -191,14 +236,21 @@ export function createSessionsSpawnTool(opts?: {
+         }
+         thinkingOverride = normalized;
+       }
+-      if (resolvedModel) {
++      if (resolvedModel || hasModelFallbacksOverride) {
+         try {
+           await callGateway({
+             method: "sessions.patch",
+-            params: { key: childSessionKey, model: resolvedModel },
++            params: {
++              key: childSessionKey,
++              ...(resolvedModel ? { model: resolvedModel } : {}),
++              ...(hasModelFallbacksOverride
++                ? { modelFallbacksOverride: resolvedModelFallbacksOverride ?? [] }
++                : {}),
++            },
+             timeoutMs: 10_000,
+           });
+-          modelApplied = true;
++          modelApplied = Boolean(resolvedModel);
++          modelFallbacksApplied = hasModelFallbacksOverride;
+         } catch (err) {
+           const messageText =
+             err instanceof Error ? err.message : typeof err === "string" ? err : "error";
+@@ -212,6 +264,8 @@ export function createSessionsSpawnTool(opts?: {
+             });
+           }
+           modelWarning = messageText;
++          modelApplied = false;
++          modelFallbacksApplied = false;
+         }
+       }
+       if (thinkingOverride !== undefined) {
+@@ -239,7 +293,7 @@ export function createSessionsSpawnTool(opts?: {
+         requesterOrigin,
+         childSessionKey,
+         label: label || undefined,
+-        task,
++        task: sanitizedTask,
+       });
+ 
+       const childIdem = crypto.randomUUID();
+@@ -248,7 +302,7 @@ export function createSessionsSpawnTool(opts?: {
+         const response = await callGateway<{ runId: string }>({
+           method: "agent",
+           params: {
+-            message: task,
++            message: sanitizedTask,
+             sessionKey: childSessionKey,
+             channel: requesterOrigin?.channel,
+             to: requesterOrigin?.to ?? undefined,
+@@ -289,7 +343,7 @@ export function createSessionsSpawnTool(opts?: {
+         requesterSessionKey: requesterInternalKey,
+         requesterOrigin,
+         requesterDisplayKey,
+-        task,
++        task: sanitizedTask,
+         cleanup,
+         label: label || undefined,
+         runTimeoutSeconds,
+@@ -300,6 +354,7 @@ export function createSessionsSpawnTool(opts?: {
+         childSessionKey,
+         runId: childRunId,
+         modelApplied: resolvedModel ? modelApplied : undefined,
++        modelFallbacksApplied: hasModelFallbacksOverride ? modelFallbacksApplied : undefined,
+         warning: modelWarning,
+       });
+     },
+diff --git a/src/auto-reply/reply/agent-runner-execution.ts b/src/auto-reply/reply/agent-runner-execution.ts
+index 372db8b30..d8eb2e61e 100644
+--- a/src/auto-reply/reply/agent-runner-execution.ts
++++ b/src/auto-reply/reply/agent-runner-execution.ts
+@@ -148,10 +148,13 @@ export async function runAgentTurnWithFallback(params: {
+         provider: params.followupRun.run.provider,
+         model: params.followupRun.run.model,
+         agentDir: params.followupRun.run.agentDir,
+-        fallbacksOverride: resolveAgentModelFallbacksOverride(
+-          params.followupRun.run.config,
+-          resolveAgentIdFromSessionKey(params.followupRun.run.sessionKey),
+-        ),
++        fallbacksOverride:
++          params.getActiveSessionEntry()?.modelFallbacksOverride ??
++          params.followupRun.run.fallbacksOverride ??
++          resolveAgentModelFallbacksOverride(
++            params.followupRun.run.config,
++            resolveAgentIdFromSessionKey(params.followupRun.run.sessionKey),
++          ),
+         run: (provider, model) => {
+           // Notify that model selection is complete (including after fallback).
+           // This allows responsePrefix template interpolation with the actual model.
+diff --git a/src/auto-reply/reply/agent-runner-memory.ts b/src/auto-reply/reply/agent-runner-memory.ts
+index f73c5c60d..d131b3ff9 100644
+--- a/src/auto-reply/reply/agent-runner-memory.ts
++++ b/src/auto-reply/reply/agent-runner-memory.ts
+@@ -101,10 +101,15 @@ export async function runMemoryFlushIfNeeded(params: {
+       provider: params.followupRun.run.provider,
+       model: params.followupRun.run.model,
+       agentDir: params.followupRun.run.agentDir,
+-      fallbacksOverride: resolveAgentModelFallbacksOverride(
+-        params.followupRun.run.config,
+-        resolveAgentIdFromSessionKey(params.followupRun.run.sessionKey),
+-      ),
++      fallbacksOverride:
++        (params.sessionKey
++          ? params.sessionStore?.[params.sessionKey]?.modelFallbacksOverride
++          : params.sessionEntry?.modelFallbacksOverride) ??
++        params.followupRun.run.fallbacksOverride ??
++        resolveAgentModelFallbacksOverride(
++          params.followupRun.run.config,
++          resolveAgentIdFromSessionKey(params.followupRun.run.sessionKey),
++        ),
+       run: (provider, model) => {
+         const authProfileId =
+           provider === params.followupRun.run.provider
+diff --git a/src/auto-reply/reply/followup-runner.test.ts b/src/auto-reply/reply/followup-runner.test.ts
+index 3ae3e318c..774f42ca9 100644
+--- a/src/auto-reply/reply/followup-runner.test.ts
++++ b/src/auto-reply/reply/followup-runner.test.ts
+@@ -7,9 +7,8 @@ import { loadSessionStore, saveSessionStore, type SessionEntry } from "../../con
+ import { createMockTypingController } from "./test-helpers.js";
+ 
+ const runEmbeddedPiAgentMock = vi.fn();
+-
+-vi.mock("../../agents/model-fallback.js", () => ({
+-  runWithModelFallback: async ({
++const runWithModelFallbackMock = vi.fn(
++  async ({
+     provider,
+     model,
+     run,
+@@ -22,6 +21,10 @@ vi.mock("../../agents/model-fallback.js", () => ({
+     provider,
+     model,
+   }),
++);
++
++vi.mock("../../agents/model-fallback.js", () => ({
++  runWithModelFallback: (params: unknown) => runWithModelFallbackMock(params),
+ }));
+ 
+ vi.mock("../../agents/pi-embedded.js", () => ({
+@@ -133,6 +136,43 @@ describe("createFollowupRunner compaction", () => {
+   });
+ });
+ 
++describe("createFollowupRunner fallback overrides", () => {
++  it("prefers session modelFallbacksOverride over queued fallback list", async () => {
++    runWithModelFallbackMock.mockClear();
++    runEmbeddedPiAgentMock.mockResolvedValueOnce({ payloads: [{ text: "ok" }], meta: {} });
++
++    const sessionKey = "main";
++    const sessionEntry: SessionEntry = {
++      sessionId: "session",
++      updatedAt: Date.now(),
++      modelFallbacksOverride: ["anthropic/claude-sonnet-4-5", "openai/gpt-5.2"],
++    };
++    const sessionStore: Record<string, SessionEntry> = { [sessionKey]: sessionEntry };
++
++    const queued = baseQueuedRun();
++    queued.run.fallbacksOverride = ["openai/gpt-4.1-mini"];
++
++    const onBlockReply = vi.fn(async () => {});
++    const runner = createFollowupRunner({
++      opts: { onBlockReply },
++      typing: createMockTypingController(),
++      typingMode: "instant",
++      sessionEntry,
++      sessionStore,
++      sessionKey,
++      defaultModel: "anthropic/claude-opus-4-5",
++    });
++
++    await runner(queued);
++
++    expect(runWithModelFallbackMock).toHaveBeenCalled();
++    const firstCall = runWithModelFallbackMock.mock.calls[0]?.[0] as
++      | { fallbacksOverride?: string[] }
++      | undefined;
++    expect(firstCall?.fallbacksOverride).toEqual(["anthropic/claude-sonnet-4-5", "openai/gpt-5.2"]);
++  });
++});
++
+ describe("createFollowupRunner messaging tool dedupe", () => {
+   it("drops payloads already sent via messaging tool", async () => {
+     const onBlockReply = vi.fn(async () => {});
+diff --git a/src/auto-reply/reply/followup-runner.ts b/src/auto-reply/reply/followup-runner.ts
+index e4c23aa04..7e31d248f 100644
+--- a/src/auto-reply/reply/followup-runner.ts
++++ b/src/auto-reply/reply/followup-runner.ts
+@@ -130,10 +130,15 @@ export function createFollowupRunner(params: {
+           provider: queued.run.provider,
+           model: queued.run.model,
+           agentDir: queued.run.agentDir,
+-          fallbacksOverride: resolveAgentModelFallbacksOverride(
+-            queued.run.config,
+-            resolveAgentIdFromSessionKey(queued.run.sessionKey),
+-          ),
++          fallbacksOverride:
++            (sessionKey
++              ? sessionStore?.[sessionKey]?.modelFallbacksOverride
++              : sessionEntry?.modelFallbacksOverride) ??
++            queued.run.fallbacksOverride ??
++            resolveAgentModelFallbacksOverride(
++              queued.run.config,
++              resolveAgentIdFromSessionKey(queued.run.sessionKey),
++            ),
+           run: (provider, model) => {
+             const authProfileId =
+               provider === queued.run.provider ? queued.run.authProfileId : undefined;
+diff --git a/src/auto-reply/reply/get-reply-run.ts b/src/auto-reply/reply/get-reply-run.ts
+index 7531622ad..f995c7f0c 100644
+--- a/src/auto-reply/reply/get-reply-run.ts
++++ b/src/auto-reply/reply/get-reply-run.ts
+@@ -385,6 +385,7 @@ export async function runPreparedReply(
+       skillsSnapshot,
+       provider,
+       model,
++      fallbacksOverride: sessionEntry?.modelFallbacksOverride,
+       authProfileId,
+       authProfileIdSource,
+       thinkLevel: resolvedThinkLevel,
+diff --git a/src/auto-reply/reply/queue/types.ts b/src/auto-reply/reply/queue/types.ts
+index 8fee20059..614ba5b76 100644
+--- a/src/auto-reply/reply/queue/types.ts
++++ b/src/auto-reply/reply/queue/types.ts
+@@ -61,6 +61,7 @@ export type FollowupRun = {
+     skillsSnapshot?: SkillSnapshot;
+     provider: string;
+     model: string;
++    fallbacksOverride?: string[];
+     authProfileId?: string;
+     authProfileIdSource?: "auto" | "user";
+     thinkLevel?: ThinkLevel;
+diff --git a/src/config/sessions/types.ts b/src/config/sessions/types.ts
+index fdd77233c..645a1954a 100644
+--- a/src/config/sessions/types.ts
++++ b/src/config/sessions/types.ts
+@@ -50,6 +50,7 @@ export type SessionEntry = {
+   responseUsage?: "on" | "off" | "tokens" | "full";
+   providerOverride?: string;
+   modelOverride?: string;
++  modelFallbacksOverride?: string[];
+   authProfileOverride?: string;
+   authProfileOverrideSource?: "auto" | "user";
+   authProfileOverrideCompactionCount?: number;
+diff --git a/src/gateway/protocol/schema/sessions.ts b/src/gateway/protocol/schema/sessions.ts
+index a4363542f..6d1019e8e 100644
+--- a/src/gateway/protocol/schema/sessions.ts
++++ b/src/gateway/protocol/schema/sessions.ts
+@@ -70,6 +70,7 @@ export const SessionsPatchParamsSchema = Type.Object(
+     execAsk: Type.Optional(Type.Union([NonEmptyString, Type.Null()])),
+     execNode: Type.Optional(Type.Union([NonEmptyString, Type.Null()])),
+     model: Type.Optional(Type.Union([NonEmptyString, Type.Null()])),
++    modelFallbacksOverride: Type.Optional(Type.Union([Type.Array(NonEmptyString), Type.Null()])),
+     spawnedBy: Type.Optional(Type.Union([NonEmptyString, Type.Null()])),
+     sendPolicy: Type.Optional(
+       Type.Union([Type.Literal("allow"), Type.Literal("deny"), Type.Null()]),
+diff --git a/src/gateway/sessions-patch.test.ts b/src/gateway/sessions-patch.test.ts
+index eb109601a..5583a956a 100644
+--- a/src/gateway/sessions-patch.test.ts
++++ b/src/gateway/sessions-patch.test.ts
+@@ -95,4 +95,58 @@ describe("gateway sessions patch", () => {
+     expect(res.entry.authProfileOverrideSource).toBeUndefined();
+     expect(res.entry.authProfileOverrideCompactionCount).toBeUndefined();
+   });
++
++  test("persists modelFallbacksOverride", async () => {
++    const store: Record<string, SessionEntry> = {};
++    const res = await applySessionsPatchToStore({
++      cfg: {} as OpenClawConfig,
++      store,
++      storeKey: "agent:main:main",
++      patch: { modelFallbacksOverride: ["anthropic/claude-sonnet-4-5", "openai/gpt-5.2"] },
++    });
++    expect(res.ok).toBe(true);
++    if (!res.ok) {
++      return;
++    }
++    expect(res.entry.modelFallbacksOverride).toEqual([
++      "anthropic/claude-sonnet-4-5",
++      "openai/gpt-5.2",
++    ]);
++  });
++
++  test("supports empty modelFallbacksOverride to disable defaults", async () => {
++    const store: Record<string, SessionEntry> = {};
++    const res = await applySessionsPatchToStore({
++      cfg: {} as OpenClawConfig,
++      store,
++      storeKey: "agent:main:main",
++      patch: { modelFallbacksOverride: [] },
++    });
++    expect(res.ok).toBe(true);
++    if (!res.ok) {
++      return;
++    }
++    expect(res.entry.modelFallbacksOverride).toEqual([]);
++  });
++
++  test("clears modelFallbacksOverride when null", async () => {
++    const store: Record<string, SessionEntry> = {
++      "agent:main:main": {
++        sessionId: "sess",
++        updatedAt: 1,
++        modelFallbacksOverride: ["anthropic/claude-sonnet-4-5"],
++      } as SessionEntry,
++    };
++    const res = await applySessionsPatchToStore({
++      cfg: {} as OpenClawConfig,
++      store,
++      storeKey: "agent:main:main",
++      patch: { modelFallbacksOverride: null },
++    });
++    expect(res.ok).toBe(true);
++    if (!res.ok) {
++      return;
++    }
++    expect(res.entry.modelFallbacksOverride).toBeUndefined();
++  });
+ });
+diff --git a/src/gateway/sessions-patch.ts b/src/gateway/sessions-patch.ts
+index ba2d7bbc0..57608673b 100644
+--- a/src/gateway/sessions-patch.ts
++++ b/src/gateway/sessions-patch.ts
+@@ -58,6 +58,26 @@ function normalizeExecAsk(raw: string): "off" | "on-miss" | "always" | undefined
+   return undefined;
+ }
+ 
++function normalizeModelFallbacksOverride(
++  raw: unknown,
++): { ok: true; value: string[] } | { ok: false; error: string } {
++  if (!Array.isArray(raw)) {
++    return { ok: false, error: "invalid modelFallbacksOverride: expected an array" };
++  }
++  const normalized: string[] = [];
++  for (const entry of raw) {
++    if (typeof entry !== "string") {
++      return { ok: false, error: "invalid modelFallbacksOverride: expected string entries" };
++    }
++    const trimmed = entry.trim();
++    if (!trimmed) {
++      return { ok: false, error: "invalid modelFallbacksOverride: entries must be non-empty" };
++    }
++    normalized.push(trimmed);
++  }
++  return { ok: true, value: normalized };
++}
++
+ export async function applySessionsPatchToStore(params: {
+   cfg: OpenClawConfig;
+   store: Record<string, SessionEntry>;
+@@ -298,6 +318,19 @@ export async function applySessionsPatchToStore(params: {
+     }
+   }
+ 
++  if ("modelFallbacksOverride" in patch) {
++    const raw = patch.modelFallbacksOverride;
++    if (raw === null) {
++      delete next.modelFallbacksOverride;
++    } else if (raw !== undefined) {
++      const normalized = normalizeModelFallbacksOverride(raw);
++      if (!normalized.ok) {
++        return invalid(normalized.error);
++      }
++      next.modelFallbacksOverride = normalized.value;
++    }
++  }
++
+   if (next.thinkingLevel === "xhigh") {
+     const effectiveProvider = next.providerOverride ?? resolvedDefault.provider;
+     const effectiveModel = next.modelOverride ?? resolvedDefault.model;
+diff --git a/src/media-understanding/apply.ts b/src/media-understanding/apply.ts
+index 766549afc..5d5c231fd 100644
+--- a/src/media-understanding/apply.ts
++++ b/src/media-understanding/apply.ts
+@@ -22,6 +22,7 @@ import {
+   normalizeMimeList,
+   normalizeMimeType,
+ } from "../media/input-files.js";
++import { detectSuspiciousPatterns, wrapExternalContent } from "../security/external-content.js";
+ import { resolveAttachmentKind } from "./attachments.js";
+ import { runWithConcurrency } from "./concurrency.js";
+ import {
+@@ -507,13 +508,21 @@ export async function applyMediaUnderstanding(params: {
+       const audioOutputs = outputs.filter((output) => output.kind === "audio.transcription");
+       if (audioOutputs.length > 0) {
+         const transcript = formatAudioTranscripts(audioOutputs);
+-        ctx.Transcript = transcript;
++        const asrHits = detectSuspiciousPatterns(transcript);
++        const safeTranscript =
++          asrHits.length > 0
++            ? wrapExternalContent(transcript, {
++                source: "asr:transcription",
++                includeWarning: true,
++              })
++            : transcript;
++        ctx.Transcript = safeTranscript;
+         if (originalUserText) {
+           ctx.CommandBody = originalUserText;
+           ctx.RawBody = originalUserText;
+         } else {
+-          ctx.CommandBody = transcript;
+-          ctx.RawBody = transcript;
++          ctx.CommandBody = safeTranscript;
++          ctx.RawBody = safeTranscript;
+         }
+       } else if (originalUserText) {
+         ctx.CommandBody = originalUserText;
+diff --git a/src/security/external-content.ts b/src/security/external-content.ts
+index 71cbd0241..388505fb8 100644
+--- a/src/security/external-content.ts
++++ b/src/security/external-content.ts
+@@ -70,9 +70,10 @@ export type ExternalContentSource =
+   | "channel_metadata"
+   | "web_search"
+   | "web_fetch"
+-  | "unknown";
++  | "unknown"
++  | (string & {});
+ 
+-const EXTERNAL_SOURCE_LABELS: Record<ExternalContentSource, string> = {
++const EXTERNAL_SOURCE_LABELS: Record<string, string> = {
+   email: "Email",
+   webhook: "Webhook",
+   api: "API",
+@@ -107,7 +108,7 @@ function foldMarkerText(input: string): string {
+   return input.replace(/[\uFF21-\uFF3A\uFF41-\uFF5A\uFF1C\uFF1E]/g, (char) => foldMarkerChar(char));
+ }
+ 
+-function replaceMarkers(content: string): string {
++export function replaceMarkers(content: string): string {
+   const folded = foldMarkerText(content);
+   if (!/external_untrusted_content/i.test(folded)) {
+     return content;
+@@ -180,7 +181,7 @@ export function wrapExternalContent(content: string, options: WrapExternalConten
+   const { source, sender, subject, includeWarning = true } = options;
+ 
+   const sanitized = replaceMarkers(content);
+-  const sourceLabel = EXTERNAL_SOURCE_LABELS[source] ?? "External";
++  const sourceLabel = (EXTERNAL_SOURCE_LABELS[source] ?? source) || "External";
+   const metadataLines: string[] = [`Source: ${sourceLabel}`];
+ 
+   if (sender) {
+diff --git a/src/telegram/bot-message-context.ts b/src/telegram/bot-message-context.ts
+index 47b5cd3bf..369b338c0 100644
+--- a/src/telegram/bot-message-context.ts
++++ b/src/telegram/bot-message-context.ts
+@@ -33,6 +33,7 @@ import { recordChannelActivity } from "../infra/channel-activity.js";
+ import { upsertChannelPairingRequest } from "../pairing/pairing-store.js";
+ import { resolveAgentRoute } from "../routing/resolve-route.js";
+ import { resolveThreadSessionKeys } from "../routing/session-key.js";
++import { buildUntrustedChannelMetadata } from "../security/channel-metadata.js";
+ import { withTelegramApiErrorLogging } from "./api-logging.js";
+ import {
+   firstDefined,
+@@ -583,6 +584,22 @@ export const buildTelegramMessageContext = async ({
+     ConversationLabel: conversationLabel,
+     GroupSubject: isGroup ? (msg.chat.title ?? undefined) : undefined,
+     GroupSystemPrompt: isGroup ? groupSystemPrompt : undefined,
++    UntrustedContext: isGroup
++      ? (() => {
++          const topicName = msg.reply_to_message?.forum_topic_created?.name ?? undefined;
++          const metadata = buildUntrustedChannelMetadata({
++            source: "telegram",
++            label: "Telegram group metadata",
++            entries: [
++              msg.chat.title ?? undefined,
++              topicName,
++              senderName,
++              senderUsername || undefined,
++            ],
++          });
++          return metadata ? [metadata] : undefined;
++        })()
++      : undefined,
+     SenderName: senderName,
+     SenderId: senderId || undefined,
+     SenderUsername: senderUsername || undefined,
+diff --git a/src/telegram/bot-native-commands.test.ts b/src/telegram/bot-native-commands.test.ts
+index 48594c1e2..49c89f59e 100644
+--- a/src/telegram/bot-native-commands.test.ts
++++ b/src/telegram/bot-native-commands.test.ts
+@@ -12,6 +12,8 @@ vi.mock("../auto-reply/skill-commands.js", () => ({
+   listSkillCommandsForAgents,
+ }));
+ 
++type TelegramMenuCommand = { command: string; description: string };
++
+ describe("registerTelegramNativeCommands", () => {
+   beforeEach(() => {
+     listSkillCommandsForAgents.mockReset();
+@@ -79,40 +81,113 @@ describe("registerTelegramNativeCommands", () => {
+     expect(listSkillCommandsForAgents).toHaveBeenCalledWith({ cfg });
+   });
+ 
+-  it("truncates Telegram command registration to 100 commands", () => {
++  it("registers default and private command scopes with different command sets", () => {
++    listSkillCommandsForAgents.mockReturnValue([
++      {
++        name: "skill_alert",
++        skillName: "skill-alert",
++        description: "Skill alert",
++      },
++    ]);
++
+     const cfg: OpenClawConfig = {
+-      commands: { native: false },
++      channels: {
++        telegram: {
++          customCommands: [{ command: "ops_help", description: "Ops helper" }],
++        },
++      },
+     };
+-    const customCommands = Array.from({ length: 120 }, (_, index) => ({
+-      command: `cmd_${index}`,
+-      description: `Command ${index}`,
+-    }));
+-    const setMyCommands = vi.fn().mockResolvedValue(undefined);
+-    const runtimeLog = vi.fn();
+-
+-    registerTelegramNativeCommands({
+-      ...buildParams(cfg),
+-      bot: {
+-        api: {
+-          setMyCommands,
+-          sendMessage: vi.fn().mockResolvedValue(undefined),
++    const params = buildParams(cfg, "bot-a");
++    params.telegramCfg = {
++      customCommands: [{ command: "ops_help", description: "Ops helper" }],
++    } as TelegramAccountConfig;
++
++    registerTelegramNativeCommands(params);
++
++    const setMyCommands = (
++      params.bot as unknown as { api: { setMyCommands: ReturnType<typeof vi.fn> } }
++    ).api.setMyCommands;
++
++    expect(setMyCommands).toHaveBeenCalledTimes(2);
++
++    const calls = setMyCommands.mock.calls as Array<
++      [TelegramMenuCommand[], { scope?: { type?: string } } | undefined]
++    >;
++    const defaultScopeCall = calls.find(([, options]) => options?.scope?.type === "default");
++    const privateScopeCall = calls.find(
++      ([, options]) => options?.scope?.type === "all_private_chats",
++    );
++
++    expect(defaultScopeCall).toBeTruthy();
++    expect(privateScopeCall).toBeTruthy();
++
++    const defaultCommands = defaultScopeCall?.[0] ?? [];
++    const privateCommands = privateScopeCall?.[0] ?? [];
++
++    expect(defaultCommands).toContainEqual({ command: "ops_help", description: "Ops helper" });
++    expect(defaultCommands.some((command) => command.command === "skill_alert")).toBe(false);
++
++    expect(privateCommands).toContainEqual({ command: "ops_help", description: "Ops helper" });
++    expect(privateCommands).toContainEqual({ command: "skill_alert", description: "Skill alert" });
++  });
++
++  it("caps private command scope at Telegram limit while keeping explicit commands", () => {
++    listSkillCommandsForAgents.mockReturnValue(
++      Array.from({ length: 120 }, (_, index) => ({
++        name: `skill_${index + 1}`,
++        skillName: `skill-${index + 1}`,
++        description: `Skill ${index + 1}`,
++      })),
++    );
++
++    const cfg: OpenClawConfig = {
++      channels: {
++        telegram: {
++          customCommands: [{ command: "ops_help", description: "Ops helper" }],
+         },
+-        command: vi.fn(),
+-      } as unknown as Parameters<typeof registerTelegramNativeCommands>[0]["bot"],
+-      runtime: { log: runtimeLog } as RuntimeEnv,
+-      telegramCfg: { customCommands } as TelegramAccountConfig,
+-      nativeEnabled: false,
+-      nativeSkillsEnabled: false,
+-    });
++      },
++    };
++    const params = buildParams(cfg, "bot-a");
++    params.telegramCfg = {
++      customCommands: [{ command: "ops_help", description: "Ops helper" }],
++    } as TelegramAccountConfig;
++
++    registerTelegramNativeCommands(params);
+ 
+-    const registeredCommands = setMyCommands.mock.calls[0]?.[0] as Array<{
+-      command: string;
+-      description: string;
+-    }>;
+-    expect(registeredCommands).toHaveLength(100);
+-    expect(registeredCommands).toEqual(customCommands.slice(0, 100));
+-    expect(runtimeLog).toHaveBeenCalledWith(
+-      "telegram: truncating 120 commands to 100 (Telegram Bot API limit)",
++    const setMyCommands = (
++      params.bot as unknown as { api: { setMyCommands: ReturnType<typeof vi.fn> } }
++    ).api.setMyCommands;
++    const calls = setMyCommands.mock.calls as Array<
++      [TelegramMenuCommand[], { scope?: { type?: string } } | undefined]
++    >;
++    const privateScopeCall = calls.find(
++      ([, options]) => options?.scope?.type === "all_private_chats",
+     );
++
++    const registered = privateScopeCall?.[0] ?? [];
++
++    expect(registered).toHaveLength(37);
++    expect(registered).toContainEqual({ command: "ops_help", description: "Ops helper" });
++  });
++
++  it("clears commands for both scopes when deleteMyCommands is available", async () => {
++    const cfg: OpenClawConfig = {};
++    const params = buildParams(cfg, "bot-a");
++    const deleteMyCommands = vi.fn().mockResolvedValue(undefined);
++    (
++      params.bot as unknown as {
++        api: { deleteMyCommands?: ReturnType<typeof vi.fn> };
++      }
++    ).api.deleteMyCommands = deleteMyCommands;
++
++    registerTelegramNativeCommands(params);
++    await Promise.resolve();
++    await Promise.resolve();
++
++    expect(deleteMyCommands).toHaveBeenCalledTimes(2);
++    expect(deleteMyCommands).toHaveBeenCalledWith({ scope: { type: "default" } });
++    expect(deleteMyCommands).toHaveBeenCalledWith({
++      scope: { type: "all_private_chats" },
++    });
+   });
+ });
+diff --git a/src/telegram/bot-native-commands.ts b/src/telegram/bot-native-commands.ts
+index e4f3538c3..7c1fcbb7a 100644
+--- a/src/telegram/bot-native-commands.ts
++++ b/src/telegram/bot-native-commands.ts
+@@ -40,6 +40,7 @@ import {
+ } from "../plugins/commands.js";
+ import { resolveAgentRoute } from "../routing/resolve-route.js";
+ import { resolveThreadSessionKeys } from "../routing/session-key.js";
++import { buildUntrustedChannelMetadata } from "../security/channel-metadata.js";
+ import { withTelegramApiErrorLogging } from "./api-logging.js";
+ import { firstDefined, isSenderAllowed, normalizeAllowFromWithStore } from "./bot-access.js";
+ import { TelegramUpdateKeyContext } from "./bot-updates.js";
+@@ -57,8 +58,13 @@ import {
+ import { buildInlineKeyboard } from "./send.js";
+ 
+ const EMPTY_RESPONSE_FALLBACK = "No response generated. Please try again.";
++// Telegram command menu currently rejects payloads above 37 commands in production.
++const TELEGRAM_MAX_MENU_COMMANDS = 37;
++const TELEGRAM_DEFAULT_COMMAND_SCOPE = { type: "default" } as const;
++const TELEGRAM_ALL_PRIVATE_CHATS_COMMAND_SCOPE = { type: "all_private_chats" } as const;
+ 
+ type TelegramNativeCommandContext = Context & { match?: string };
++type TelegramMenuCommand = { command: string; description: string };
+ 
+ type TelegramCommandAuthResult = {
+   chatId: number;
+@@ -72,6 +78,46 @@ type TelegramCommandAuthResult = {
+   commandAuthorized: boolean;
+ };
+ 
++type BuildTelegramMenuCommandsParams = {
++  commands: TelegramMenuCommand[];
++  skillCommandNames: Set<string>;
++  runtime: RuntimeEnv;
++  scopeType: "default" | "all_private_chats";
++};
++
++function buildTelegramMenuCommands({
++  commands,
++  skillCommandNames,
++  runtime,
++  scopeType,
++}: BuildTelegramMenuCommandsParams): TelegramMenuCommand[] {
++  if (commands.length <= TELEGRAM_MAX_MENU_COMMANDS) {
++    return commands;
++  }
++
++  // Telegram rejects setMyCommands when more than 37 commands are registered.
++  // Keep built-in/plugin/custom commands first, then fill remaining slots with skills.
++  const nonSkillCommands = commands.filter(
++    (command) => !skillCommandNames.has(command.command.toLowerCase()),
++  );
++  const remainingSlots = Math.max(0, TELEGRAM_MAX_MENU_COMMANDS - nonSkillCommands.length);
++  const skillOnlyCommands = commands.filter((command) =>
++    skillCommandNames.has(command.command.toLowerCase()),
++  );
++  const limited = [...nonSkillCommands, ...skillOnlyCommands.slice(0, remainingSlots)].slice(
++    0,
++    TELEGRAM_MAX_MENU_COMMANDS,
++  );
++
++  runtime.error?.(
++    danger(
++      `Telegram ${scopeType} command menu generated ${commands.length} commands; API limit is ${TELEGRAM_MAX_MENU_COMMANDS}. ` +
++        `Keeping ${limited.length} commands (built-in/plugin/custom first).`,
++    ),
++  );
++  return limited;
++}
++
+ export type RegisterTelegramHandlerParams = {
+   cfg: OpenClawConfig;
+   accountId: string;
+@@ -300,6 +346,11 @@ export const registerTelegramNativeCommands = ({
+     nativeEnabled && nativeSkillsEnabled
+       ? listSkillCommandsForAgents(boundAgentIds ? { cfg, agentIds: boundAgentIds } : { cfg })
+       : [];
++  const coreNativeCommands = nativeEnabled
++    ? listNativeCommandSpecsForConfig(cfg, {
++        provider: "telegram",
++      })
++    : [];
+   const nativeCommands = nativeEnabled
+     ? listNativeCommandSpecsForConfig(cfg, {
+         skillCommands,
+@@ -358,7 +409,15 @@ export const registerTelegramNativeCommands = ({
+     existingCommands.add(normalized);
+     pluginCommands.push({ command: normalized, description });
+   }
+-  const allCommandsFull: Array<{ command: string; description: string }> = [
++  const defaultScopeCandidates: TelegramMenuCommand[] = [
++    ...coreNativeCommands.map((command) => ({
++      command: command.name,
++      description: command.description,
++    })),
++    ...pluginCommands,
++    ...customCommands,
++  ];
++  const privateScopeCandidates: TelegramMenuCommand[] = [
+     ...nativeCommands.map((command) => ({
+       command: command.name,
+       description: command.description,
+@@ -366,39 +425,101 @@ export const registerTelegramNativeCommands = ({
+     ...pluginCommands,
+     ...customCommands,
+   ];
+-  // Telegram Bot API limits commands to 100 per scope.
+-  // Truncate with a warning rather than failing with BOT_COMMANDS_TOO_MUCH.
+-  const TELEGRAM_MAX_COMMANDS = 100;
+-  if (allCommandsFull.length > TELEGRAM_MAX_COMMANDS) {
+-    runtime.log?.(
+-      `telegram: truncating ${allCommandsFull.length} commands to ${TELEGRAM_MAX_COMMANDS} (Telegram Bot API limit)`,
+-    );
+-  }
+-  const allCommands = allCommandsFull.slice(0, TELEGRAM_MAX_COMMANDS);
++  const skillCommandNames = new Set(skillCommands.map((command) => command.name.toLowerCase()));
++  const defaultScopeCommands = buildTelegramMenuCommands({
++    commands: defaultScopeCandidates,
++    skillCommandNames,
++    runtime,
++    scopeType: TELEGRAM_DEFAULT_COMMAND_SCOPE.type,
++  });
++  const privateScopeCommands = buildTelegramMenuCommands({
++    commands: privateScopeCandidates,
++    skillCommandNames,
++    runtime,
++    scopeType: TELEGRAM_ALL_PRIVATE_CHATS_COMMAND_SCOPE.type,
++  });
++  const allCommands = privateScopeCandidates;
++
++  const logCommandSyncFailures = (
++    operation: "deleteMyCommands" | "setMyCommands",
++    results: PromiseSettledResult<unknown>[],
++  ) => {
++    const failed = results.filter((result) => result.status === "rejected").length;
++    if (failed > 0) {
++      runtime.error?.(
++        danger(
++          `telegram ${operation} failed for ${failed} scope(s) during command auto-registration.`,
++        ),
++      );
++    }
++  };
+ 
+   // Clear stale commands before registering new ones to prevent
+   // leftover commands from deleted skills persisting across restarts (#5717).
+   // Chain delete → set so a late-resolving delete cannot wipe newly registered commands.
+   const registerCommands = () => {
+-    if (allCommands.length > 0) {
+-      withTelegramApiErrorLogging({
+-        operation: "setMyCommands",
+-        runtime,
+-        fn: () => bot.api.setMyCommands(allCommands),
+-      }).catch(() => {});
++    const setRequests: Promise<unknown>[] = [];
++    if (defaultScopeCommands.length > 0) {
++      setRequests.push(
++        withTelegramApiErrorLogging({
++          operation: "setMyCommands",
++          runtime,
++          fn: () =>
++            bot.api.setMyCommands(defaultScopeCommands, {
++              scope: TELEGRAM_DEFAULT_COMMAND_SCOPE,
++            }),
++        }),
++      );
++    }
++    if (privateScopeCommands.length > 0) {
++      setRequests.push(
++        withTelegramApiErrorLogging({
++          operation: "setMyCommands",
++          runtime,
++          fn: () =>
++            bot.api.setMyCommands(privateScopeCommands, {
++              scope: TELEGRAM_ALL_PRIVATE_CHATS_COMMAND_SCOPE,
++            }),
++        }),
++      );
++    }
++    if (setRequests.length === 0) {
++      return Promise.resolve();
+     }
++    return Promise.allSettled(setRequests).then((results) => {
++      logCommandSyncFailures("setMyCommands", results);
++    });
+   };
+   if (typeof bot.api.deleteMyCommands === "function") {
+-    withTelegramApiErrorLogging({
+-      operation: "deleteMyCommands",
+-      runtime,
+-      fn: () => bot.api.deleteMyCommands(),
+-    })
+-      .catch(() => {})
+-      .then(registerCommands)
+-      .catch(() => {});
++    void Promise.allSettled([
++      withTelegramApiErrorLogging({
++        operation: "deleteMyCommands",
++        runtime,
++        fn: () =>
++          bot.api.deleteMyCommands({
++            scope: TELEGRAM_DEFAULT_COMMAND_SCOPE,
++          }),
++      }),
++      withTelegramApiErrorLogging({
++        operation: "deleteMyCommands",
++        runtime,
++        fn: () =>
++          bot.api.deleteMyCommands({
++            scope: TELEGRAM_ALL_PRIVATE_CHATS_COMMAND_SCOPE,
++          }),
++      }),
++    ])
++      .then((results) => {
++        logCommandSyncFailures("deleteMyCommands", results);
++        return registerCommands();
++      })
++      .catch((err) => {
++        runtime.error?.(danger(`telegram command auto-registration aborted: ${String(err)}`));
++      });
+   } else {
+-    registerCommands();
++    void registerCommands().catch((err) => {
++      runtime.error?.(danger(`telegram command auto-registration aborted: ${String(err)}`));
++    });
+   }
+ 
+   if (allCommands.length > 0) {
+@@ -504,7 +625,7 @@ export const registerTelegramNativeCommands = ({
+             channel: "telegram",
+             accountId,
+             peer: {
+-              kind: isGroup ? "group" : "direct",
++              kind: isGroup ? "group" : "dm",
+               id: isGroup ? buildTelegramGroupPeerId(chatId, resolvedThreadId) : String(chatId),
+             },
+             parentPeer,
+@@ -548,6 +669,22 @@ export const registerTelegramNativeCommands = ({
+             ConversationLabel: conversationLabel,
+             GroupSubject: isGroup ? (msg.chat.title ?? undefined) : undefined,
+             GroupSystemPrompt: isGroup ? groupSystemPrompt : undefined,
++            UntrustedContext: isGroup
++              ? (() => {
++                  const topicName = msg.reply_to_message?.forum_topic_created?.name ?? undefined;
++                  const metadata = buildUntrustedChannelMetadata({
++                    source: "telegram",
++                    label: "Telegram group metadata",
++                    entries: [
++                      msg.chat.title ?? undefined,
++                      topicName,
++                      buildSenderName(msg),
++                      senderUsername || undefined,
++                    ],
++                  });
++                  return metadata ? [metadata] : undefined;
++                })()
++              : undefined,
+             SenderName: buildSenderName(msg),
+             SenderId: senderId || undefined,
+             SenderUsername: senderUsername || undefined,
+@@ -684,10 +821,6 @@ export const registerTelegramNativeCommands = ({
+             isForum,
+             messageThreadId,
+           });
+-          const from = isGroup
+-            ? buildTelegramGroupFrom(chatId, threadSpec.id)
+-            : `telegram:${chatId}`;
+-          const to = `telegram:${chatId}`;
+ 
+           const result = await executePluginCommand({
+             command: match.command,
+@@ -697,10 +830,6 @@ export const registerTelegramNativeCommands = ({
+             isAuthorizedSender: commandAuthorized,
+             commandBody,
+             config: cfg,
+-            from,
+-            to,
+-            accountId,
+-            messageThreadId: threadSpec.id,
+           });
+           const tableMode = resolveMarkdownTableMode({
+             cfg,
+@@ -726,10 +855,32 @@ export const registerTelegramNativeCommands = ({
+       }
+     }
+   } else if (nativeDisabledExplicit) {
+-    withTelegramApiErrorLogging({
+-      operation: "setMyCommands",
+-      runtime,
+-      fn: () => bot.api.setMyCommands([]),
+-    }).catch(() => {});
++    void Promise.allSettled([
++      withTelegramApiErrorLogging({
++        operation: "setMyCommands",
++        runtime,
++        fn: () =>
++          bot.api.setMyCommands([], {
++            scope: TELEGRAM_DEFAULT_COMMAND_SCOPE,
++          }),
++      }),
++      withTelegramApiErrorLogging({
++        operation: "setMyCommands",
++        runtime,
++        fn: () =>
++          bot.api.setMyCommands([], {
++            scope: TELEGRAM_ALL_PRIVATE_CHATS_COMMAND_SCOPE,
++          }),
++      }),
++    ]).then((results) => {
++      const failed = results.filter((result) => result.status === "rejected").length;
++      if (failed > 0) {
++        runtime.error?.(
++          danger(
++            `telegram setMyCommands failed for ${failed} scope(s) while clearing command menu.`,
++          ),
++        );
++      }
++    });
+   }
+ };
+-- 
+2.50.1 (Apple Git-155)
+

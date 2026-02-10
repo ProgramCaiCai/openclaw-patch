@@ -1,0 +1,463 @@
+From 9513e9c013850b9c7132c65b5000152b4b54efae Mon Sep 17 00:00:00 2001
+From: programcaicai <programcaicai@programcaicaideMac-mini.local>
+Date: Tue, 10 Feb 2026 13:27:17 +0800
+Subject: [PATCH 08/11] feat(tools): add safe_call wrapper for bounded tool
+ output
+
+---
+ src/agents/openclaw-tools.sessions.test.ts |   3 +
+ src/agents/openclaw-tools.ts               |  13 +-
+ src/agents/tools/safe-call-tool.test.ts    | 120 ++++++++++
+ src/agents/tools/safe-call-tool.ts         | 260 +++++++++++++++++++++
+ 4 files changed, 393 insertions(+), 3 deletions(-)
+ create mode 100644 src/agents/tools/safe-call-tool.test.ts
+ create mode 100644 src/agents/tools/safe-call-tool.ts
+
+diff --git a/src/agents/openclaw-tools.sessions.test.ts b/src/agents/openclaw-tools.sessions.test.ts
+index f1a0aea89..bfa3ded60 100644
+--- a/src/agents/openclaw-tools.sessions.test.ts
++++ b/src/agents/openclaw-tools.sessions.test.ts
+@@ -73,6 +73,9 @@ describe("sessions tools", () => {
+     expect(schemaProp("sessions_spawn", "thinking").type).toBe("string");
+     expect(schemaProp("sessions_spawn", "runTimeoutSeconds").type).toBe("number");
+     expect(schemaProp("sessions_spawn", "timeoutSeconds").type).toBe("number");
++    expect(schemaProp("safe_call", "maxChars").type).toBe("number");
++    expect(schemaProp("safe_call", "offset").type).toBe("number");
++    expect(schemaProp("safe_call", "limit").type).toBe("number");
+   });
+ 
+   it("sessions_list filters kinds and includes messages", async () => {
+diff --git a/src/agents/openclaw-tools.ts b/src/agents/openclaw-tools.ts
+index 5efbdc7d5..15dfc8250 100644
+--- a/src/agents/openclaw-tools.ts
++++ b/src/agents/openclaw-tools.ts
+@@ -11,6 +11,7 @@ import { createGatewayTool } from "./tools/gateway-tool.js";
+ import { createImageTool } from "./tools/image-tool.js";
+ import { createMessageTool } from "./tools/message-tool.js";
+ import { createNodesTool } from "./tools/nodes-tool.js";
++import { createSafeCallTool } from "./tools/safe-call-tool.js";
+ import { createSessionCompactTool } from "./tools/session-compact-tool.js";
+ import { createSessionStatusTool } from "./tools/session-status-tool.js";
+ import { createSessionsHistoryTool } from "./tools/sessions-history-tool.js";
+@@ -95,7 +96,7 @@ export function createOpenClawTools(options?: {
+         sandboxRoot: options?.sandboxRoot,
+         requireExplicitTarget: options?.requireExplicitMessageTarget,
+       });
+-  const tools: AnyAgentTool[] = [
++  const coreTools: AnyAgentTool[] = [
+     createBrowserTool({
+       sandboxBridgeUrl: options?.sandboxBrowserBridgeUrl,
+       allowHostControl: options?.allowHostBrowserControl,
+@@ -172,9 +173,15 @@ export function createOpenClawTools(options?: {
+       agentAccountId: options?.agentAccountId,
+       sandboxed: options?.sandboxed,
+     },
+-    existingToolNames: new Set(tools.map((tool) => tool.name)),
++    existingToolNames: new Set([...coreTools.map((tool) => tool.name), "safe_call"]),
+     toolAllowlist: options?.pluginToolAllowlist,
+   });
+ 
+-  return [...tools, ...pluginTools];
++  const wrappedTools = [...coreTools, ...pluginTools];
++  const safeCallTool = createSafeCallTool({
++    resolveTool: (name) =>
++      wrappedTools.find((tool) => tool.name === name && tool.name !== "safe_call"),
++  });
++
++  return [...wrappedTools, safeCallTool];
+ }
+diff --git a/src/agents/tools/safe-call-tool.test.ts b/src/agents/tools/safe-call-tool.test.ts
+new file mode 100644
+index 000000000..1480dc0f6
+--- /dev/null
++++ b/src/agents/tools/safe-call-tool.test.ts
+@@ -0,0 +1,120 @@
++import { describe, expect, it } from "vitest";
++import type { AnyAgentTool } from "./common.js";
++import { createSafeCallTool } from "./safe-call-tool.js";
++
++function createStubTool(payload: unknown): AnyAgentTool {
++  return {
++    label: "Stub",
++    name: "stub",
++    description: "stub tool",
++    parameters: {},
++    execute: async () => ({
++      content: [{ type: "text", text: JSON.stringify(payload) }],
++      details: payload,
++    }),
++  };
++}
++
++describe("safe_call tool", () => {
++  it("applies fields and array pagination", async () => {
++    const stub = createStubTool([
++      { id: 1, name: "one" },
++      { id: 2, name: "two" },
++      { id: 3, name: "three" },
++    ]);
++    const tool = createSafeCallTool({
++      resolveTool: (name) => (name === "stub" ? stub : undefined),
++    });
++
++    const result = await tool.execute("call-1", {
++      tool: "stub",
++      params: {},
++      fields: ["id"],
++      offset: 1,
++      limit: 1,
++    });
++
++    const details = result.details as {
++      totalItems: number;
++      hasMore: boolean;
++      nextOffset?: number;
++      output: string;
++      fields: string[];
++    };
++
++    expect(details.totalItems).toBe(3);
++    expect(details.hasMore).toBe(true);
++    expect(details.nextOffset).toBe(2);
++    expect(details.fields).toEqual(["id"]);
++    expect(details.output).toContain('"id": 2');
++    expect(details.output).not.toContain('"name"');
++  });
++
++  it("paginates non-array payloads by line", async () => {
++    const stub = createStubTool({ a: 1, b: 2, c: 3 });
++    const tool = createSafeCallTool({
++      resolveTool: (name) => (name === "stub" ? stub : undefined),
++    });
++
++    const result = await tool.execute("call-2", {
++      tool: "stub",
++      params: {},
++      offset: 1,
++      limit: 2,
++    });
++
++    const details = result.details as {
++      mode: string;
++      totalItems: number;
++      hasMore: boolean;
++      nextOffset?: number;
++      output: string;
++    };
++
++    expect(details.mode).toBe("lines");
++    expect(details.totalItems).toBeGreaterThan(2);
++    expect(details.hasMore).toBe(true);
++    expect(details.nextOffset).toBe(3);
++    expect(details.output).toContain('"a": 1');
++    expect(details.output).toContain('"b": 2');
++    expect(details.output).not.toContain('"c": 3');
++  });
++
++  it("truncates oversized output with head and tail", async () => {
++    const stub = createStubTool(`HEAD-${"x".repeat(120)}-TAIL`);
++    const tool = createSafeCallTool({
++      resolveTool: (name) => (name === "stub" ? stub : undefined),
++    });
++
++    const result = await tool.execute("call-3", {
++      tool: "stub",
++      params: {},
++      maxChars: 80,
++    });
++
++    const details = result.details as {
++      truncated: boolean;
++      output: string;
++    };
++
++    expect(details.truncated).toBe(true);
++    expect(details.output).toContain("HEAD-");
++    expect(details.output).toContain("-TAIL");
++    expect(details.output).toContain("用 offset 翻页查看更多");
++    expect(details.output.length).toBeLessThanOrEqual(80);
++  });
++
++  it("rejects unknown tools and self wrapping", async () => {
++    const stub = createStubTool({ ok: true });
++    const tool = createSafeCallTool({
++      resolveTool: (name) => (name === "stub" ? stub : undefined),
++    });
++
++    await expect(tool.execute("call-4", { tool: "missing", params: {} })).rejects.toThrow(
++      "Unknown tool: missing",
++    );
++    await expect(tool.execute("call-5", { tool: "safe_call", params: {} })).rejects.toThrow(
++      "safe_call cannot wrap itself",
++    );
++  });
++});
+diff --git a/src/agents/tools/safe-call-tool.ts b/src/agents/tools/safe-call-tool.ts
+new file mode 100644
+index 000000000..07721fecb
+--- /dev/null
++++ b/src/agents/tools/safe-call-tool.ts
+@@ -0,0 +1,260 @@
++import { Type } from "@sinclair/typebox";
++import { truncateUtf16Safe } from "../../utils.js";
++import {
++  type AnyAgentTool,
++  jsonResult,
++  readNumberParam,
++  readStringArrayParam,
++  readStringParam,
++} from "./common.js";
++
++const DEFAULT_MAX_CHARS = 2000;
++const TRUNCATION_HINT = "提示: 用 offset 翻页查看更多";
++
++const SafeCallToolSchema = Type.Object({
++  tool: Type.String(),
++  params: Type.Optional(Type.Object({}, { additionalProperties: true })),
++  maxChars: Type.Optional(Type.Number({ minimum: 1 })),
++  offset: Type.Optional(Type.Number({ minimum: 0 })),
++  limit: Type.Optional(Type.Number({ minimum: 1 })),
++  fields: Type.Optional(Type.Array(Type.String())),
++});
++
++type SafeCallToolOptions = {
++  resolveTool: (name: string) => AnyAgentTool | undefined;
++};
++
++type PageResult = {
++  mode: "array" | "lines";
++  totalItems: number;
++  hasMore: boolean;
++  nextOffset?: number;
++  output: unknown;
++};
++
++function isRecord(value: unknown): value is Record<string, unknown> {
++  return value !== null && typeof value === "object" && !Array.isArray(value);
++}
++
++function getPathValue(source: unknown, path: string[]): unknown {
++  let current: unknown = source;
++  for (const segment of path) {
++    if (!isRecord(current) || !(segment in current)) {
++      return undefined;
++    }
++    current = current[segment];
++  }
++  return current;
++}
++
++function setPathValue(target: Record<string, unknown>, path: string[], value: unknown) {
++  let current: Record<string, unknown> = target;
++  for (let index = 0; index < path.length; index += 1) {
++    const key = path[index];
++    if (!key) {
++      return;
++    }
++    const isLeaf = index === path.length - 1;
++    if (isLeaf) {
++      current[key] = value;
++      return;
++    }
++    const existing = current[key];
++    if (!isRecord(existing)) {
++      current[key] = {};
++    }
++    current = current[key] as Record<string, unknown>;
++  }
++}
++
++function pickFieldsFromRecord(value: Record<string, unknown>, fields: string[]) {
++  const picked: Record<string, unknown> = {};
++  for (const field of fields) {
++    const path = field
++      .split(".")
++      .map((segment) => segment.trim())
++      .filter(Boolean);
++    if (path.length === 0) {
++      continue;
++    }
++    const selected = getPathValue(value, path);
++    if (selected === undefined) {
++      continue;
++    }
++    setPathValue(picked, path, selected);
++  }
++  return picked;
++}
++
++function applyFields(value: unknown, fields: string[] | undefined): unknown {
++  if (!fields || fields.length === 0) {
++    return value;
++  }
++  const normalized = Array.from(new Set(fields.map((field) => field.trim()).filter(Boolean)));
++  if (normalized.length === 0) {
++    return value;
++  }
++  if (Array.isArray(value)) {
++    return value.map((entry) =>
++      isRecord(entry) ? pickFieldsFromRecord(entry, normalized) : entry,
++    );
++  }
++  if (isRecord(value)) {
++    return pickFieldsFromRecord(value, normalized);
++  }
++  return value;
++}
++
++function paginateArray(items: unknown[], offset: number, limit?: number): PageResult {
++  const totalItems = items.length;
++  const end = typeof limit === "number" ? offset + limit : totalItems;
++  const sliced = items.slice(offset, end);
++  const hasMore = end < totalItems;
++  return {
++    mode: "array",
++    totalItems,
++    hasMore,
++    nextOffset: hasMore ? end : undefined,
++    output: sliced,
++  };
++}
++
++function paginateLines(raw: string, offset: number, limit?: number): PageResult {
++  const lines = raw.split(/\r?\n/);
++  const totalItems = lines.length;
++  const end = typeof limit === "number" ? offset + limit : totalItems;
++  const sliced = lines.slice(offset, end).join("\n");
++  const hasMore = end < totalItems;
++  return {
++    mode: "lines",
++    totalItems,
++    hasMore,
++    nextOffset: hasMore ? end : undefined,
++    output: sliced,
++  };
++}
++
++function serializeOutput(value: unknown): string {
++  if (typeof value === "string") {
++    return value;
++  }
++  try {
++    return JSON.stringify(value, null, 2);
++  } catch {
++    return String(value);
++  }
++}
++
++function truncateWithHeadTail(
++  text: string,
++  maxChars: number,
++): { output: string; truncated: boolean } {
++  if (text.length <= maxChars) {
++    return { output: text, truncated: false };
++  }
++  if (maxChars <= 0) {
++    return { output: "", truncated: true };
++  }
++
++  const divider = `\n...\n${TRUNCATION_HINT}\n...\n`;
++  if (maxChars <= divider.length + 2) {
++    return {
++      output: truncateUtf16Safe(text, maxChars),
++      truncated: true,
++    };
++  }
++
++  const edge = Math.max(1, Math.floor((maxChars - divider.length) / 2));
++  const head = truncateUtf16Safe(text, edge);
++  const tail = truncateUtf16Safe(text.slice(Math.max(0, text.length - edge)), edge);
++  let output = `${head}${divider}${tail}`;
++  if (output.length > maxChars) {
++    output = truncateUtf16Safe(output, maxChars);
++  }
++  return { output, truncated: true };
++}
++
++function extractPayload(result: unknown): unknown {
++  if (!isRecord(result)) {
++    return result;
++  }
++  if ("details" in result && result.details !== undefined) {
++    return result.details;
++  }
++
++  const content = result.content;
++  if (Array.isArray(content)) {
++    const textBlocks = content
++      .filter((entry) => isRecord(entry) && entry.type === "text" && typeof entry.text === "string")
++      .map((entry) => String((entry as { text?: unknown }).text));
++    if (textBlocks.length > 0) {
++      return textBlocks.join("\n");
++    }
++  }
++
++  return result;
++}
++
++export function createSafeCallTool(options: SafeCallToolOptions): AnyAgentTool {
++  return {
++    label: "Safe Call",
++    name: "safe_call",
++    description:
++      "Call another tool and safely post-process its output with field filtering, pagination, and maxChars truncation.",
++    parameters: SafeCallToolSchema,
++    execute: async (toolCallId, args) => {
++      const params = args as Record<string, unknown>;
++      const toolName = readStringParam(params, "tool", { required: true });
++      if (toolName === "safe_call") {
++        throw new Error("safe_call cannot wrap itself");
++      }
++
++      const target = options.resolveTool(toolName);
++      if (!target) {
++        throw new Error(`Unknown tool: ${toolName}`);
++      }
++
++      const targetParamsRaw = params.params;
++      const targetParams = isRecord(targetParamsRaw) ? targetParamsRaw : {};
++      const requestedOffset = readNumberParam(params, "offset", { integer: true }) ?? 0;
++      const requestedLimit = readNumberParam(params, "limit", { integer: true });
++      const requestedMaxChars = readNumberParam(params, "maxChars", { integer: true });
++      const fields = readStringArrayParam(params, "fields");
++
++      const offset = Math.max(0, requestedOffset);
++      const limit =
++        typeof requestedLimit === "number" && Number.isFinite(requestedLimit)
++          ? Math.max(1, requestedLimit)
++          : undefined;
++      const maxChars =
++        typeof requestedMaxChars === "number" && Number.isFinite(requestedMaxChars)
++          ? Math.max(1, requestedMaxChars)
++          : DEFAULT_MAX_CHARS;
++
++      const targetResult = await target.execute(
++        `${toolCallId}:safe_call:${toolName}`,
++        targetParams,
++      );
++      const selected = applyFields(extractPayload(targetResult), fields);
++      const page = Array.isArray(selected)
++        ? paginateArray(selected, offset, limit)
++        : paginateLines(serializeOutput(selected), offset, limit);
++      const serialized = serializeOutput(page.output);
++      const truncated = truncateWithHeadTail(serialized, maxChars);
++
++      return jsonResult({
++        tool: toolName,
++        mode: page.mode,
++        totalItems: page.totalItems,
++        hasMore: page.hasMore,
++        nextOffset: page.nextOffset,
++        offset,
++        limit: limit ?? null,
++        maxChars,
++        fields: fields ?? [],
++        truncated: truncated.truncated,
++        output: truncated.output,
++      });
++    },
++  };
++}
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,450 @@
+From 5dbbf451237d2c1ac12f3438d83cc5a55bb5c16d Mon Sep 17 00:00:00 2001
+From: programcaicai <programcaicai@programcaicaideMac-mini.local>
+Date: Tue, 10 Feb 2026 15:25:28 +0800
+Subject: [PATCH 10/11] feat(tools): add filter command support to safe_call
+
+---
+ src/agents/tools/safe-call-tool.test.ts | 158 ++++++++++++++++++-
+ src/agents/tools/safe-call-tool.ts      | 198 ++++++++++++++++++++++--
+ 2 files changed, 344 insertions(+), 12 deletions(-)
+
+diff --git a/src/agents/tools/safe-call-tool.test.ts b/src/agents/tools/safe-call-tool.test.ts
+index 7f99ea468..0e0e4712b 100644
+--- a/src/agents/tools/safe-call-tool.test.ts
++++ b/src/agents/tools/safe-call-tool.test.ts
+@@ -1,4 +1,12 @@
+-import { describe, expect, it } from "vitest";
++import { beforeEach, describe, expect, it, vi } from "vitest";
++
++const { execSyncMock } = vi.hoisted(() => ({
++  execSyncMock: vi.fn(),
++}));
++vi.mock("node:child_process", () => ({
++  execSync: execSyncMock,
++}));
++
+ import type { AnyAgentTool } from "./common.js";
+ import { createSafeCallTool } from "./safe-call-tool.js";
+ 
+@@ -34,6 +42,10 @@ function hasDanglingSurrogate(text: string): boolean {
+ }
+ 
+ describe("safe_call tool", () => {
++  beforeEach(() => {
++    execSyncMock.mockReset();
++  });
++
+   it("applies fields and array pagination", async () => {
+     const stub = createStubTool([
+       { id: 1, name: "one" },
+@@ -286,4 +298,148 @@ describe("safe_call tool", () => {
+     expect(details.truncated).toBe(true);
+     expect(hasDanglingSurrogate(details.output)).toBe(false);
+   });
++
++  it("supports filter commands and marks filterApplied", async () => {
++    const stub = createStubTool({
++      jobs: [{ name: "one" }, { name: "two" }, { name: "three" }],
++    });
++    execSyncMock.mockReturnValue('[{"name":"one"},{"name":"two"}]\n');
++
++    const tool = createSafeCallTool({
++      resolveTool: (name) => (name === "stub" ? stub : undefined),
++    });
++
++    const result = await tool.execute("call-12", {
++      tool: "stub",
++      params: {},
++      filter: "jq '.jobs[:2]'",
++      fields: ["jobs.name"],
++    });
++
++    const details = result.details as {
++      mode: string;
++      fields: string[];
++      filterApplied: boolean;
++      output: string;
++    };
++
++    expect(execSyncMock).toHaveBeenCalledTimes(1);
++    expect(execSyncMock.mock.calls[0]?.[0]).toBe("jq '.jobs[:2]'");
++    expect(details.mode).toBe("lines");
++    expect(details.filterApplied).toBe(true);
++    expect(details.fields).toEqual([]);
++    expect(details.output).toContain('"one"');
++    expect(details.output).toContain('"two"');
++    expect(details.output).not.toContain('"three"');
++  });
++
++  it("rejects forbidden filter commands", async () => {
++    const stub = createStubTool({ ok: true });
++    const tool = createSafeCallTool({
++      resolveTool: (name) => (name === "stub" ? stub : undefined),
++    });
++
++    await expect(
++      tool.execute("call-13", {
++        tool: "stub",
++        params: {},
++        filter: "rm -rf /",
++      }),
++    ).rejects.toThrow("Forbidden filter command: rm");
++    expect(execSyncMock).not.toHaveBeenCalled();
++  });
++
++  it("rejects filter pipelines", async () => {
++    const stub = createStubTool({ ok: true });
++    const tool = createSafeCallTool({
++      resolveTool: (name) => (name === "stub" ? stub : undefined),
++    });
++
++    await expect(
++      tool.execute("call-14", {
++        tool: "stub",
++        params: {},
++        filter: "jq '.' | head",
++      }),
++    ).rejects.toThrow("single command");
++    expect(execSyncMock).not.toHaveBeenCalled();
++  });
++
++  it("surfaces filter timeout errors", async () => {
++    const timeoutError = new Error("spawnSync /bin/sh ETIMEDOUT") as Error & {
++      code: string;
++    };
++    timeoutError.code = "ETIMEDOUT";
++    execSyncMock.mockImplementation(() => {
++      throw timeoutError;
++    });
++
++    const stub = createStubTool({ ok: true });
++    const tool = createSafeCallTool({
++      resolveTool: (name) => (name === "stub" ? stub : undefined),
++    });
++
++    await expect(
++      tool.execute("call-15", {
++        tool: "stub",
++        params: {},
++        filter: "jq '.'",
++      }),
++    ).rejects.toThrow("timed out after 5000ms");
++  });
++
++  it("enforces maxChars after filtering", async () => {
++    execSyncMock.mockReturnValue(`HEAD-${"x".repeat(200)}-TAIL`);
++
++    const stub = createStubTool({ ok: true });
++    const tool = createSafeCallTool({
++      resolveTool: (name) => (name === "stub" ? stub : undefined),
++    });
++
++    const result = await tool.execute("call-16", {
++      tool: "stub",
++      params: {},
++      filter: "jq '.'",
++      maxChars: 48,
++    });
++
++    const details = result.details as {
++      truncated: boolean;
++      output: string;
++    };
++
++    expect(details.truncated).toBe(true);
++    expect(details.output.length).toBeLessThanOrEqual(48);
++  });
++
++  it("rejects negative or zero pagination constraints", async () => {
++    const stub = createStubTool({ ok: true });
++    const tool = createSafeCallTool({
++      resolveTool: (name) => (name === "stub" ? stub : undefined),
++    });
++
++    await expect(
++      tool.execute("call-17", {
++        tool: "stub",
++        params: {},
++        offset: -1,
++      }),
++    ).rejects.toThrow("offset must be >= 0");
++
++    await expect(
++      tool.execute("call-18", {
++        tool: "stub",
++        params: {},
++        limit: -1,
++      }),
++    ).rejects.toThrow("limit must be >= 1");
++
++    await expect(
++      tool.execute("call-19", {
++        tool: "stub",
++        params: {},
++        maxChars: 0,
++      }),
++    ).rejects.toThrow("maxChars must be >= 1");
++  });
+ });
+diff --git a/src/agents/tools/safe-call-tool.ts b/src/agents/tools/safe-call-tool.ts
+index 6d69090d7..f3804f6b8 100644
+--- a/src/agents/tools/safe-call-tool.ts
++++ b/src/agents/tools/safe-call-tool.ts
+@@ -1,4 +1,5 @@
+ import { Type } from "@sinclair/typebox";
++import { execSync } from "node:child_process";
+ import { truncateUtf16Safe } from "../../utils.js";
+ import {
+   type AnyAgentTool,
+@@ -11,6 +12,34 @@ import {
+ const DEFAULT_MAX_CHARS = 2000;
+ const TRUNCATION_HINT = "提示: 用 offset 翻页查看更多";
+ const BLOCKED_FIELD_SEGMENTS = new Set(["__proto__", "constructor", "prototype"]);
++const FILTER_TIMEOUT_MS = 5000;
++const FILTER_MAX_BUFFER = 8 * 1024 * 1024;
++const ALLOWED_FILTER_COMMANDS = new Set([
++  "jq",
++  "grep",
++  "rg",
++  "awk",
++  "sed",
++  "head",
++  "tail",
++  "cut",
++  "sort",
++  "uniq",
++  "wc",
++  "tr",
++]);
++const FORBIDDEN_FILTER_COMMANDS = new Set([
++  "rm",
++  "mv",
++  "cp",
++  "curl",
++  "wget",
++  "bash",
++  "sh",
++  "eval",
++  "exec",
++  "cat",
++]);
+ 
+ type SafeCallPolicy = {
+   allowWrapping?: boolean;
+@@ -24,10 +53,12 @@ const SafeCallToolSchema = Type.Object({
+   offset: Type.Optional(Type.Number({ minimum: 0 })),
+   limit: Type.Optional(Type.Number({ minimum: 1 })),
+   fields: Type.Optional(Type.Array(Type.String())),
++  filter: Type.Optional(Type.String()),
+ });
+ 
+ type SafeCallToolOptions = {
+   resolveTool: (name: string) => AnyAgentTool | undefined;
++  runFilterCommand?: (command: string, input: string) => string;
+ };
+ 
+ type PageResult = {
+@@ -299,6 +330,136 @@ function extractPayload(result: unknown): unknown {
+   return result;
+ }
+ 
++function parseFilterCommandName(filter: string): string {
++  const match = /^([a-zA-Z0-9_-]+)/.exec(filter);
++  if (!match) {
++    throw new Error("Invalid filter command: expected a command followed by optional arguments");
++  }
++  return match[1];
++}
++
++function assertSafeFilterSyntax(filter: string) {
++  let inSingleQuote = false;
++  let inDoubleQuote = false;
++  let escaped = false;
++
++  for (let index = 0; index < filter.length; index += 1) {
++    const char = filter[index];
++
++    if (!inSingleQuote && escaped) {
++      escaped = false;
++      continue;
++    }
++
++    if (!inSingleQuote && char === "\\") {
++      escaped = true;
++      continue;
++    }
++
++    if (char === "'" && !inDoubleQuote) {
++      inSingleQuote = !inSingleQuote;
++      continue;
++    }
++
++    if (char === '"' && !inSingleQuote) {
++      inDoubleQuote = !inDoubleQuote;
++      continue;
++    }
++
++    if (!inSingleQuote && char === "`") {
++      throw new Error("filter does not allow command substitution");
++    }
++
++    if (!inSingleQuote && char === "$" && filter[index + 1] === "(") {
++      throw new Error("filter does not allow command substitution");
++    }
++
++    if (inSingleQuote || inDoubleQuote) {
++      continue;
++    }
++
++    if (char === "|" || char === ";" || char === "&" || char === "<" || char === ">") {
++      throw new Error("filter only supports a single command without shell operators");
++    }
++
++    if (char === "\n" || char === "\r") {
++      throw new Error("filter must be a single command line");
++    }
++  }
++
++  if (inSingleQuote || inDoubleQuote) {
++    throw new Error("Invalid filter command: unterminated quote");
++  }
++}
++
++function validateFilterCommand(filterRaw: string): string {
++  const filter = filterRaw.trim();
++  if (!filter) {
++    throw new Error("filter must be a non-empty command");
++  }
++
++  assertSafeFilterSyntax(filter);
++
++  const commandName = parseFilterCommandName(filter);
++  if (FORBIDDEN_FILTER_COMMANDS.has(commandName)) {
++    throw new Error(`Forbidden filter command: ${commandName}`);
++  }
++  if (!ALLOWED_FILTER_COMMANDS.has(commandName)) {
++    throw new Error(
++      `Unsupported filter command: ${commandName}. Allowed commands: ${Array.from(ALLOWED_FILTER_COMMANDS).join(", ")}`,
++    );
++  }
++
++  return filter;
++}
++
++function readFilterErrorOutput(value: unknown): string {
++  if (typeof value === "string") {
++    return value.trim();
++  }
++  if (Buffer.isBuffer(value)) {
++    return value.toString("utf8").trim();
++  }
++  return "";
++}
++
++function executeFilterCommand(command: string, input: string): string {
++  try {
++    return execSync(command, {
++      input,
++      encoding: "utf8",
++      timeout: FILTER_TIMEOUT_MS,
++      maxBuffer: FILTER_MAX_BUFFER,
++      stdio: ["pipe", "pipe", "pipe"],
++    });
++  } catch (error) {
++    if (isRecord(error)) {
++      const code = typeof error.code === "string" ? error.code : undefined;
++      const message = typeof error.message === "string" ? error.message : "Filter command failed";
++      const stderr = readFilterErrorOutput(error.stderr);
++
++      if (code === "ETIMEDOUT" || message.toLowerCase().includes("timed out")) {
++        throw new Error(`Filter command timed out after ${FILTER_TIMEOUT_MS}ms`, { cause: error });
++      }
++
++      if (code === "ENOENT") {
++        throw new Error("Filter command failed: command not found", { cause: error });
++      }
++
++      const status = typeof error.status === "number" ? error.status : undefined;
++      const details = truncateUtf16Safe(stderr || message, 240);
++      if (typeof status === "number") {
++        throw new Error(`Filter command failed with exit code ${status}: ${details}`, {
++          cause: error,
++        });
++      }
++      throw new Error(`Filter command failed: ${details}`, { cause: error });
++    }
++
++    throw error;
++  }
++}
++
+ function readSafeCallPolicy(tool: AnyAgentTool): SafeCallPolicy {
+   const toolRecord = tool as unknown as Record<string, unknown>;
+   const policyRaw = toolRecord.safeCall;
+@@ -368,21 +529,29 @@ export function createSafeCallTool(options: SafeCallToolOptions): AnyAgentTool {
+       // opt into stricter wrapping via `safeCall.allowWrapping` and `safeCall.allowedParams`.
+       const targetParams = selectTargetParams(targetParamsSource, policy.allowedParams);
+ 
+-      const requestedOffset = readNumberParam(params, "offset", { integer: true }) ?? 0;
++      const requestedOffset = readNumberParam(params, "offset", { integer: true });
+       const requestedLimit = readNumberParam(params, "limit", { integer: true });
+       const requestedMaxChars = readNumberParam(params, "maxChars", { integer: true });
+       const requestedFields = readStringArrayParam(params, "fields");
++      const requestedFilter = readStringParam(params, "filter");
+       const normalizedFields = normalizeFields(requestedFields);
+ 
+-      const offset = Math.max(0, requestedOffset);
+-      const limit =
+-        typeof requestedLimit === "number" && Number.isFinite(requestedLimit)
+-          ? Math.max(1, requestedLimit)
+-          : undefined;
++      if (typeof requestedOffset === "number" && requestedOffset < 0) {
++        throw new Error("offset must be >= 0");
++      }
++      if (typeof requestedLimit === "number" && requestedLimit < 1) {
++        throw new Error("limit must be >= 1");
++      }
++      if (typeof requestedMaxChars === "number" && requestedMaxChars < 1) {
++        throw new Error("maxChars must be >= 1");
++      }
++
++      const offset = requestedOffset ?? 0;
++      const limit = typeof requestedLimit === "number" ? requestedLimit : undefined;
+       const maxChars =
+-        typeof requestedMaxChars === "number" && Number.isFinite(requestedMaxChars)
+-          ? Math.max(1, requestedMaxChars)
+-          : DEFAULT_MAX_CHARS;
++        typeof requestedMaxChars === "number" ? requestedMaxChars : DEFAULT_MAX_CHARS;
++      const filter =
++        typeof requestedFilter === "string" ? validateFilterCommand(requestedFilter) : undefined;
+ 
+       const targetResult = await target.execute(
+         `${toolCallId}:safe_call:${toolName}`,
+@@ -391,7 +560,13 @@ export function createSafeCallTool(options: SafeCallToolOptions): AnyAgentTool {
+       const payload = extractPayload(targetResult);
+ 
+       let page: PageResult;
+-      if (Array.isArray(payload)) {
++      let filterApplied = false;
++      if (filter) {
++        const filterRunner = options.runFilterCommand ?? executeFilterCommand;
++        const filteredOutput = filterRunner(filter, serializeOutput(payload));
++        page = paginateLines(filteredOutput, offset, limit);
++        filterApplied = true;
++      } else if (Array.isArray(payload)) {
+         const paged = paginateArray(payload, offset, limit);
+         page = {
+           ...paged,
+@@ -414,7 +589,8 @@ export function createSafeCallTool(options: SafeCallToolOptions): AnyAgentTool {
+         offset,
+         limit: limit ?? null,
+         maxChars,
+-        fields: normalizedFields.names,
++        fields: filterApplied ? [] : normalizedFields.names,
++        filterApplied,
+         truncated: truncated.truncated,
+         output: truncated.output,
+       });
+-- 
+2.50.1 (Apple Git-155)
+

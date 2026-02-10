@@ -1,0 +1,71 @@
+From f822d995fb3cd878e50017b2a11b2392dd054db4 Mon Sep 17 00:00:00 2001
+From: programcaicai <programcaicai@programcaicaideMac-mini.local>
+Date: Sat, 7 Feb 2026 13:13:59 +0800
+Subject: [PATCH 06/11] fix: pass agentId directly to session_compact tool to
+ fix store lookup for subagent sessions
+
+---
+ src/agents/openclaw-tools.ts             | 10 ++++++----
+ src/agents/tools/session-compact-tool.ts |  4 ++--
+ 2 files changed, 8 insertions(+), 6 deletions(-)
+
+diff --git a/src/agents/openclaw-tools.ts b/src/agents/openclaw-tools.ts
+index 75292315c..5efbdc7d5 100644
+--- a/src/agents/openclaw-tools.ts
++++ b/src/agents/openclaw-tools.ts
+@@ -77,6 +77,10 @@ export function createOpenClawTools(options?: {
+     config: options?.config,
+     sandboxed: options?.sandboxed,
+   });
++  const agentId = resolveSessionAgentId({
++    sessionKey: options?.agentSessionKey,
++    config: options?.config,
++  });
+   const messageTool = options?.disableMessageTool
+     ? null
+     : createMessageTool({
+@@ -149,6 +153,7 @@ export function createOpenClawTools(options?: {
+     createSessionCompactTool({
+       agentSessionKey: options?.agentSessionKey,
+       agentSessionId: options?.agentSessionId,
++      agentId,
+       config: options?.config,
+     }),
+     ...(webSearchTool ? [webSearchTool] : []),
+@@ -161,10 +166,7 @@ export function createOpenClawTools(options?: {
+       config: options?.config,
+       workspaceDir: options?.workspaceDir,
+       agentDir: options?.agentDir,
+-      agentId: resolveSessionAgentId({
+-        sessionKey: options?.agentSessionKey,
+-        config: options?.config,
+-      }),
++      agentId,
+       sessionKey: options?.agentSessionKey,
+       messageChannel: options?.agentChannel,
+       agentAccountId: options?.agentAccountId,
+diff --git a/src/agents/tools/session-compact-tool.ts b/src/agents/tools/session-compact-tool.ts
+index 0c76656f5..161a8b2d9 100644
+--- a/src/agents/tools/session-compact-tool.ts
++++ b/src/agents/tools/session-compact-tool.ts
+@@ -24,6 +24,7 @@ const SCHEDULED_COMPACTIONS = new Set<string>();
+ export function createSessionCompactTool(opts?: {
+   agentSessionKey?: string;
+   agentSessionId?: string;
++  agentId?: string;
+   config?: OpenClawConfig;
+ }): AnyAgentTool {
+   return {
+@@ -54,8 +55,7 @@ export function createSessionCompactTool(opts?: {
+       }
+ 
+       const cfg = opts?.config ?? loadConfig();
+-
+-      const agentId = resolveSessionAgentId({ sessionKey, config: cfg });
++      const agentId = opts?.agentId?.trim() || resolveSessionAgentId({ sessionKey, config: cfg });
+       const storePath = resolveStorePath(cfg.session?.store, { agentId });
+       const store = loadSessionStore(storePath);
+       const entry = store[sessionKey];
+-- 
+2.50.1 (Apple Git-155)
+

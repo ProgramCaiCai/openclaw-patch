@@ -1,0 +1,338 @@
+From 87941f9899bef7010180d45f4f86a1cf96a57400 Mon Sep 17 00:00:00 2001
+From: programcaicai <programcaicai@programcaicaideMac-mini.local>
+Date: Tue, 10 Feb 2026 15:50:10 +0800
+Subject: [PATCH 11/11] refactor(tools): rename safe_call to ctx_safe_call for
+ context-safety clarity
+
+---
+ src/agents/openclaw-tools.sessions.test.ts    |  6 +--
+ src/agents/openclaw-tools.ts                  | 10 ++---
+ ...ool.test.ts => ctx-safe-call-tool.test.ts} | 38 +++++++++----------
+ ...afe-call-tool.ts => ctx-safe-call-tool.ts} | 34 ++++++++---------
+ 4 files changed, 44 insertions(+), 44 deletions(-)
+ rename src/agents/tools/{safe-call-tool.test.ts => ctx-safe-call-tool.test.ts} (92%)
+ rename src/agents/tools/{safe-call-tool.ts => ctx-safe-call-tool.ts} (93%)
+
+diff --git a/src/agents/openclaw-tools.sessions.test.ts b/src/agents/openclaw-tools.sessions.test.ts
+index bfa3ded60..39ee41774 100644
+--- a/src/agents/openclaw-tools.sessions.test.ts
++++ b/src/agents/openclaw-tools.sessions.test.ts
+@@ -73,9 +73,9 @@ describe("sessions tools", () => {
+     expect(schemaProp("sessions_spawn", "thinking").type).toBe("string");
+     expect(schemaProp("sessions_spawn", "runTimeoutSeconds").type).toBe("number");
+     expect(schemaProp("sessions_spawn", "timeoutSeconds").type).toBe("number");
+-    expect(schemaProp("safe_call", "maxChars").type).toBe("number");
+-    expect(schemaProp("safe_call", "offset").type).toBe("number");
+-    expect(schemaProp("safe_call", "limit").type).toBe("number");
++    expect(schemaProp("ctx_safe_call", "maxChars").type).toBe("number");
++    expect(schemaProp("ctx_safe_call", "offset").type).toBe("number");
++    expect(schemaProp("ctx_safe_call", "limit").type).toBe("number");
+   });
+ 
+   it("sessions_list filters kinds and includes messages", async () => {
+diff --git a/src/agents/openclaw-tools.ts b/src/agents/openclaw-tools.ts
+index 15dfc8250..e9d7af93f 100644
+--- a/src/agents/openclaw-tools.ts
++++ b/src/agents/openclaw-tools.ts
+@@ -7,11 +7,11 @@ import { createAgentsListTool } from "./tools/agents-list-tool.js";
+ import { createBrowserTool } from "./tools/browser-tool.js";
+ import { createCanvasTool } from "./tools/canvas-tool.js";
+ import { createCronTool } from "./tools/cron-tool.js";
++import { createCtxSafeCallTool } from "./tools/ctx-safe-call-tool.js";
+ import { createGatewayTool } from "./tools/gateway-tool.js";
+ import { createImageTool } from "./tools/image-tool.js";
+ import { createMessageTool } from "./tools/message-tool.js";
+ import { createNodesTool } from "./tools/nodes-tool.js";
+-import { createSafeCallTool } from "./tools/safe-call-tool.js";
+ import { createSessionCompactTool } from "./tools/session-compact-tool.js";
+ import { createSessionStatusTool } from "./tools/session-status-tool.js";
+ import { createSessionsHistoryTool } from "./tools/sessions-history-tool.js";
+@@ -173,15 +173,15 @@ export function createOpenClawTools(options?: {
+       agentAccountId: options?.agentAccountId,
+       sandboxed: options?.sandboxed,
+     },
+-    existingToolNames: new Set([...coreTools.map((tool) => tool.name), "safe_call"]),
++    existingToolNames: new Set([...coreTools.map((tool) => tool.name), "ctx_safe_call"]),
+     toolAllowlist: options?.pluginToolAllowlist,
+   });
+ 
+   const wrappedTools = [...coreTools, ...pluginTools];
+-  const safeCallTool = createSafeCallTool({
++  const ctxSafeCallTool = createCtxSafeCallTool({
+     resolveTool: (name) =>
+-      wrappedTools.find((tool) => tool.name === name && tool.name !== "safe_call"),
++      wrappedTools.find((tool) => tool.name === name && tool.name !== "ctx_safe_call"),
+   });
+ 
+-  return [...wrappedTools, safeCallTool];
++  return [...wrappedTools, ctxSafeCallTool];
+ }
+diff --git a/src/agents/tools/safe-call-tool.test.ts b/src/agents/tools/ctx-safe-call-tool.test.ts
+similarity index 92%
+rename from src/agents/tools/safe-call-tool.test.ts
+rename to src/agents/tools/ctx-safe-call-tool.test.ts
+index 0e0e4712b..98551a944 100644
+--- a/src/agents/tools/safe-call-tool.test.ts
++++ b/src/agents/tools/ctx-safe-call-tool.test.ts
+@@ -8,7 +8,7 @@ vi.mock("node:child_process", () => ({
+ }));
+ 
+ import type { AnyAgentTool } from "./common.js";
+-import { createSafeCallTool } from "./safe-call-tool.js";
++import { createCtxSafeCallTool } from "./ctx-safe-call-tool.js";
+ 
+ function createStubTool(payload: unknown): AnyAgentTool {
+   return {
+@@ -41,7 +41,7 @@ function hasDanglingSurrogate(text: string): boolean {
+   return false;
+ }
+ 
+-describe("safe_call tool", () => {
++describe("ctx_safe_call tool", () => {
+   beforeEach(() => {
+     execSyncMock.mockReset();
+   });
+@@ -52,7 +52,7 @@ describe("safe_call tool", () => {
+       { id: 2, name: "two" },
+       { id: 3, name: "three" },
+     ]);
+-    const tool = createSafeCallTool({
++    const tool = createCtxSafeCallTool({
+       resolveTool: (name) => (name === "stub" ? stub : undefined),
+     });
+ 
+@@ -82,7 +82,7 @@ describe("safe_call tool", () => {
+ 
+   it("paginates non-array payloads by line", async () => {
+     const stub = createStubTool({ a: 1, b: 2, c: 3 });
+-    const tool = createSafeCallTool({
++    const tool = createCtxSafeCallTool({
+       resolveTool: (name) => (name === "stub" ? stub : undefined),
+     });
+ 
+@@ -112,7 +112,7 @@ describe("safe_call tool", () => {
+ 
+   it("truncates oversized output with head and tail", async () => {
+     const stub = createStubTool(`HEAD-${"x".repeat(120)}-TAIL`);
+-    const tool = createSafeCallTool({
++    const tool = createCtxSafeCallTool({
+       resolveTool: (name) => (name === "stub" ? stub : undefined),
+     });
+ 
+@@ -136,21 +136,21 @@ describe("safe_call tool", () => {
+ 
+   it("rejects unknown tools and self wrapping", async () => {
+     const stub = createStubTool({ ok: true });
+-    const tool = createSafeCallTool({
++    const tool = createCtxSafeCallTool({
+       resolveTool: (name) => (name === "stub" ? stub : undefined),
+     });
+ 
+     await expect(tool.execute("call-4", { tool: "missing", params: {} })).rejects.toThrow(
+       "Unknown tool: missing",
+     );
+-    await expect(tool.execute("call-5", { tool: "safe_call", params: {} })).rejects.toThrow(
+-      "safe_call cannot wrap itself",
++    await expect(tool.execute("call-5", { tool: "ctx_safe_call", params: {} })).rejects.toThrow(
++      "ctx_safe_call cannot wrap itself",
+     );
+   });
+ 
+   it("rejects prototype pollution field paths", async () => {
+     const stub = createStubTool([{ id: 1 }]);
+-    const tool = createSafeCallTool({
++    const tool = createCtxSafeCallTool({
+       resolveTool: (name) => (name === "stub" ? stub : undefined),
+     });
+ 
+@@ -201,7 +201,7 @@ describe("safe_call tool", () => {
+         details: payload,
+       }),
+     };
+-    const tool = createSafeCallTool({
++    const tool = createCtxSafeCallTool({
+       resolveTool: (name) => (name === "stub" ? stub : undefined),
+     });
+ 
+@@ -236,7 +236,7 @@ describe("safe_call tool", () => {
+       }),
+     };
+ 
+-    const tool = createSafeCallTool({
++    const tool = createCtxSafeCallTool({
+       resolveTool: (name) => (name === "stub" ? stub : undefined),
+     });
+ 
+@@ -259,7 +259,7 @@ describe("safe_call tool", () => {
+ 
+   it("handles very small maxChars", async () => {
+     const stub = createStubTool("abcdef");
+-    const tool = createSafeCallTool({
++    const tool = createCtxSafeCallTool({
+       resolveTool: (name) => (name === "stub" ? stub : undefined),
+     });
+ 
+@@ -280,7 +280,7 @@ describe("safe_call tool", () => {
+ 
+   it("does not emit dangling surrogates after truncation", async () => {
+     const stub = createStubTool(`START-${"😀".repeat(80)}-END`);
+-    const tool = createSafeCallTool({
++    const tool = createCtxSafeCallTool({
+       resolveTool: (name) => (name === "stub" ? stub : undefined),
+     });
+ 
+@@ -305,7 +305,7 @@ describe("safe_call tool", () => {
+     });
+     execSyncMock.mockReturnValue('[{"name":"one"},{"name":"two"}]\n');
+ 
+-    const tool = createSafeCallTool({
++    const tool = createCtxSafeCallTool({
+       resolveTool: (name) => (name === "stub" ? stub : undefined),
+     });
+ 
+@@ -335,7 +335,7 @@ describe("safe_call tool", () => {
+ 
+   it("rejects forbidden filter commands", async () => {
+     const stub = createStubTool({ ok: true });
+-    const tool = createSafeCallTool({
++    const tool = createCtxSafeCallTool({
+       resolveTool: (name) => (name === "stub" ? stub : undefined),
+     });
+ 
+@@ -351,7 +351,7 @@ describe("safe_call tool", () => {
+ 
+   it("rejects filter pipelines", async () => {
+     const stub = createStubTool({ ok: true });
+-    const tool = createSafeCallTool({
++    const tool = createCtxSafeCallTool({
+       resolveTool: (name) => (name === "stub" ? stub : undefined),
+     });
+ 
+@@ -375,7 +375,7 @@ describe("safe_call tool", () => {
+     });
+ 
+     const stub = createStubTool({ ok: true });
+-    const tool = createSafeCallTool({
++    const tool = createCtxSafeCallTool({
+       resolveTool: (name) => (name === "stub" ? stub : undefined),
+     });
+ 
+@@ -392,7 +392,7 @@ describe("safe_call tool", () => {
+     execSyncMock.mockReturnValue(`HEAD-${"x".repeat(200)}-TAIL`);
+ 
+     const stub = createStubTool({ ok: true });
+-    const tool = createSafeCallTool({
++    const tool = createCtxSafeCallTool({
+       resolveTool: (name) => (name === "stub" ? stub : undefined),
+     });
+ 
+@@ -414,7 +414,7 @@ describe("safe_call tool", () => {
+ 
+   it("rejects negative or zero pagination constraints", async () => {
+     const stub = createStubTool({ ok: true });
+-    const tool = createSafeCallTool({
++    const tool = createCtxSafeCallTool({
+       resolveTool: (name) => (name === "stub" ? stub : undefined),
+     });
+ 
+diff --git a/src/agents/tools/safe-call-tool.ts b/src/agents/tools/ctx-safe-call-tool.ts
+similarity index 93%
+rename from src/agents/tools/safe-call-tool.ts
+rename to src/agents/tools/ctx-safe-call-tool.ts
+index f3804f6b8..331acbcef 100644
+--- a/src/agents/tools/safe-call-tool.ts
++++ b/src/agents/tools/ctx-safe-call-tool.ts
+@@ -41,12 +41,12 @@ const FORBIDDEN_FILTER_COMMANDS = new Set([
+   "cat",
+ ]);
+ 
+-type SafeCallPolicy = {
++type CtxSafeCallPolicy = {
+   allowWrapping?: boolean;
+   allowedParams?: Set<string>;
+ };
+ 
+-const SafeCallToolSchema = Type.Object({
++const CtxSafeCallToolSchema = Type.Object({
+   tool: Type.String(),
+   params: Type.Optional(Type.Object({}, { additionalProperties: true })),
+   maxChars: Type.Optional(Type.Number({ minimum: 1 })),
+@@ -56,7 +56,7 @@ const SafeCallToolSchema = Type.Object({
+   filter: Type.Optional(Type.String()),
+ });
+ 
+-type SafeCallToolOptions = {
++type CtxSafeCallToolOptions = {
+   resolveTool: (name: string) => AnyAgentTool | undefined;
+   runFilterCommand?: (command: string, input: string) => string;
+ };
+@@ -460,9 +460,9 @@ function executeFilterCommand(command: string, input: string): string {
+   }
+ }
+ 
+-function readSafeCallPolicy(tool: AnyAgentTool): SafeCallPolicy {
++function readCtxSafeCallPolicy(tool: AnyAgentTool): CtxSafeCallPolicy {
+   const toolRecord = tool as unknown as Record<string, unknown>;
+-  const policyRaw = toolRecord.safeCall;
++  const policyRaw = toolRecord.ctxSafeCall;
+   if (!isRecord(policyRaw)) {
+     return {};
+   }
+@@ -499,18 +499,18 @@ function selectTargetParams(
+   return selected;
+ }
+ 
+-export function createSafeCallTool(options: SafeCallToolOptions): AnyAgentTool {
++export function createCtxSafeCallTool(options: CtxSafeCallToolOptions): AnyAgentTool {
+   return {
+-    label: "Safe Call",
+-    name: "safe_call",
++    label: "Context Safe Call",
++    name: "ctx_safe_call",
+     description:
+-      "Call another tool and safely post-process its output with field filtering, pagination, and maxChars truncation.",
+-    parameters: SafeCallToolSchema,
++      "Context-safe tool wrapper. Calls another built-in tool with bounded output (maxChars, offset/limit pagination, field filtering, shell filter commands) to protect the context window.",
++    parameters: CtxSafeCallToolSchema,
+     execute: async (toolCallId, args) => {
+       const params = args as Record<string, unknown>;
+       const toolName = readStringParam(params, "tool", { required: true });
+-      if (toolName === "safe_call") {
+-        throw new Error("safe_call cannot wrap itself");
++      if (toolName === "ctx_safe_call") {
++        throw new Error("ctx_safe_call cannot wrap itself");
+       }
+ 
+       const target = options.resolveTool(toolName);
+@@ -518,15 +518,15 @@ export function createSafeCallTool(options: SafeCallToolOptions): AnyAgentTool {
+         throw new Error(`Unknown tool: ${toolName}`);
+       }
+ 
+-      const policy = readSafeCallPolicy(target);
++      const policy = readCtxSafeCallPolicy(target);
+       if (policy.allowWrapping === false) {
+-        throw new Error(`Tool does not allow safe_call wrapping: ${toolName}`);
++        throw new Error(`Tool does not allow ctx_safe_call wrapping: ${toolName}`);
+       }
+ 
+       const targetParamsRaw = params.params;
+       const targetParamsSource = isRecord(targetParamsRaw) ? targetParamsRaw : {};
+-      // Security boundary: safe_call forwards tool-specific params by default; target tools may
+-      // opt into stricter wrapping via `safeCall.allowWrapping` and `safeCall.allowedParams`.
++      // Context boundary: ctx_safe_call forwards tool-specific params by default; target tools may
++      // opt into stricter wrapping via `ctxSafeCall.allowWrapping` and `ctxSafeCall.allowedParams`.
+       const targetParams = selectTargetParams(targetParamsSource, policy.allowedParams);
+ 
+       const requestedOffset = readNumberParam(params, "offset", { integer: true });
+@@ -554,7 +554,7 @@ export function createSafeCallTool(options: SafeCallToolOptions): AnyAgentTool {
+         typeof requestedFilter === "string" ? validateFilterCommand(requestedFilter) : undefined;
+ 
+       const targetResult = await target.execute(
+-        `${toolCallId}:safe_call:${toolName}`,
++        `${toolCallId}:ctx_safe_call:${toolName}`,
+         targetParams,
+       );
+       const payload = extractPayload(targetResult);
+-- 
+2.50.1 (Apple Git-155)
+
